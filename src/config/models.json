@@ -1,0 +1,492 @@
+{
+  "controller": {
+    "name": "LLMCommune",
+    "port": 4000,
+    "public_base_url": "http://192.168.1.203:4000",
+    "default_ready_timeout_s": 900,
+    "default_poll_interval_ms": 2000,
+    "bonzai_profile_id": "gguf_coder_next_large"
+  },
+  "hosts": {
+    "spark": {
+      "host_id": "spark",
+      "display_name": "spark-f147",
+      "role": "head",
+      "ssh_target": "admin@192.168.1.203",
+      "public_host": "192.168.1.203",
+      "link_ip": "169.254.10.1"
+    },
+    "gx10": {
+      "host_id": "gx10",
+      "display_name": "gx10-b041",
+      "role": "worker",
+      "ssh_target": "admin@192.168.1.204",
+      "public_host": "192.168.1.204",
+      "link_ip": "169.254.10.2"
+    }
+  },
+  "lanes": {
+    "large": {
+      "lane_id": "large",
+      "display_name": "Large Lane",
+      "description": "Primary lane on spark. May host large or mini models, but only one profile at a time.",
+      "host_id": "spark",
+      "port": 8000,
+      "allowed_size_classes": [
+        "mini",
+        "large"
+      ],
+      "max_active_profiles": 1
+    },
+    "mini": {
+      "lane_id": "mini",
+      "display_name": "Mini Lane",
+      "description": "Secondary lane on spark. Only mini models (32B or less) may run here.",
+      "host_id": "spark",
+      "port": 7999,
+      "allowed_size_classes": [
+        "mini"
+      ],
+      "max_active_profiles": 1
+    }
+  },
+  "profiles": [
+    {
+      "profile_id": "gguf_coder_next_large",
+      "display_name": "CoderNext GGUF",
+      "model_id": "other/Qwen3-Coder-Next-Q4_K_M",
+      "runtime_family": "llama.cpp",
+      "size_class": "large",
+      "parameter_count_b": 80,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_coder_next_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 10,
+        "cold_start_s": 60,
+        "ready_timeout_s": 180
+      },
+      "model_paths": {
+        "spark": "/mnt/models/other/Qwen3-Coder-Next-Q4_K_M/files/Qwen3-Coder-Next-Q4_K_M.gguf",
+        "gx10": ""
+      },
+      "selection_role": "cli_default",
+      "cli_selectable": true,
+      "notes": "Fast fallback and bonzai target on the large lane."
+    },
+    {
+      "profile_id": "gguf_qwen3_next_80b_large",
+      "display_name": "Qwen3 Next 80B A3B GGUF",
+      "model_id": "qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M",
+      "runtime_family": "llama.cpp",
+      "size_class": "large",
+      "parameter_count_b": 80,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_qwen3_next_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 15,
+        "cold_start_s": 90,
+        "ready_timeout_s": 240
+      },
+      "model_paths": {
+        "spark": "/mnt/models/qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M/files/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf",
+        "gx10": "/mnt/models/qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M/files/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf"
+      },
+      "selection_role": "cli_candidate",
+      "cli_selectable": true,
+      "notes": "Large single-box GGUF lane on spark."
+    },
+    {
+      "profile_id": "trt_single_qwen3_30b_a3b_large",
+      "display_name": "Qwen3 30B A3B NVFP4",
+      "model_id": "nvidia/Qwen3-30B-A3B-NVFP4",
+      "runtime_family": "trtllm",
+      "size_class": "mini",
+      "parameter_count_b": 30,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_single_qwen3_30b_a3b_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 30,
+        "cold_start_s": 240,
+        "ready_timeout_s": 900
+      },
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Qwen3-30B-A3B-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/Qwen3-30B-A3B-NVFP4/files"
+      },
+      "selection_role": "cli_candidate",
+      "cli_selectable": true,
+      "notes": "Small-enough model, but the current wired TRT path serves it on the large lane."
+    },
+    {
+      "profile_id": "trt_single_qwen3_32b_large",
+      "display_name": "Qwen3 32B NVFP4",
+      "model_id": "nvidia/Qwen3-32B-NVFP4",
+      "runtime_family": "trtllm",
+      "size_class": "mini",
+      "parameter_count_b": 32,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_single_qwen3_32b_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 30,
+        "cold_start_s": 240,
+        "ready_timeout_s": 900
+      },
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Qwen3-32B-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/Qwen3-32B-NVFP4/files"
+      },
+      "selection_role": "cli_candidate",
+      "cli_selectable": true,
+      "notes": "Small-enough model, but the current wired TRT path serves it on the large lane."
+    },
+    {
+      "profile_id": "trt_dual_qwen235_large",
+      "display_name": "Qwen3 235B A22B NVFP4",
+      "model_id": "nvidia/Qwen3-235B-A22B-NVFP4",
+      "runtime_family": "trtllm",
+      "size_class": "large",
+      "parameter_count_b": 235,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": true,
+      "backing_hosts": [
+        "spark",
+        "gx10"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_dual_qwen235_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 45,
+        "cold_start_s": 420,
+        "ready_timeout_s": 900
+      },
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Qwen3-235B-A22B-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/Qwen3-235B-A22B-NVFP4/files"
+      },
+      "selection_role": "cli_dual_candidate",
+      "cli_selectable": true,
+      "notes": "Reserves both boxes and serves through spark:8000."
+    },
+    {
+      "profile_id": "trt_dual_gpt_oss_120b_large",
+      "display_name": "GPT-OSS 120B",
+      "model_id": "openai/gpt-oss-120b",
+      "runtime_family": "trtllm",
+      "size_class": "large",
+      "parameter_count_b": 120,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": true,
+      "backing_hosts": [
+        "spark",
+        "gx10"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_dual_gpt_oss_120b_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 60,
+        "cold_start_s": 540,
+        "ready_timeout_s": 1200
+      },
+      "model_paths": {
+        "spark": "/mnt/models/openai/gpt-oss-120b/files/models--openai--gpt-oss-120b",
+        "gx10": "/mnt/models/openai/gpt-oss-120b/files/models--openai--gpt-oss-120b"
+      },
+      "selection_role": "cli_dual_candidate",
+      "cli_selectable": true,
+      "notes": "Reserves both boxes and serves through spark:8000."
+    },
+    {
+      "profile_id": "trt_dual_llama33_70b_large",
+      "display_name": "Llama 3.3 70B FP4",
+      "model_id": "nvidia/Llama-3.3-70B-Instruct-FP4",
+      "runtime_family": "trtllm",
+      "size_class": "large",
+      "parameter_count_b": 70,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": true,
+      "backing_hosts": [
+        "spark",
+        "gx10"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_dual_llama33_70b_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 45,
+        "cold_start_s": 360,
+        "ready_timeout_s": 1200
+      },
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Llama-3.3-70B-Instruct-FP4/files",
+        "gx10": "/mnt/models/nvidia/Llama-3.3-70B-Instruct-FP4/files"
+      },
+      "selection_role": "cli_dual_candidate",
+      "cli_selectable": true,
+      "notes": "Reserves both boxes and serves through spark:8000."
+    },
+    {
+      "profile_id": "gguf_deepseek_32b_mini",
+      "display_name": "DeepSeek R1 Distill Qwen 32B Q4_K_M",
+      "model_id": "qwen/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M",
+      "runtime_family": "llama.cpp",
+      "size_class": "mini",
+      "parameter_count_b": 32,
+      "default_lane": "mini",
+      "allowed_lanes": [
+        "mini"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_deepseek_7999.sh",
+      "startup_expectation": {
+        "warm_switch_s": 8,
+        "cold_start_s": 45,
+        "ready_timeout_s": 180
+      },
+      "model_paths": {
+        "spark": "/mnt/models/qwen/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M/files/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf",
+        "gx10": "/mnt/models/qwen/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M/files/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf"
+      },
+      "selection_role": "alpha_reserved",
+      "cli_selectable": false,
+      "notes": "Mini lane default. Keep reserved for Alpha unless explicitly overridden later."
+    }
+  ],
+  "inventory_models": [
+    {
+      "model_id": "WizardLM/WizardLM-2-8x22B-AWQ",
+      "display_name": "WizardLM 2 8x22B AWQ",
+      "size_class": "large",
+      "parameter_count_b": 176,
+      "model_paths": {
+        "spark": "/mnt/models/WizardLM/WizardLM-2-8x22B-AWQ/files",
+        "gx10": "/mnt/models/WizardLM/WizardLM-2-8x22B-AWQ/files"
+      }
+    },
+    {
+      "model_id": "agentica/DeepSWE-Preview-Q4_K_M",
+      "display_name": "DeepSWE Preview Q4_K_M",
+      "size_class": "mini",
+      "parameter_count_b": null,
+      "model_paths": {
+        "spark": "/mnt/models/agentica/DeepSWE-Preview-Q4_K_M/files/DeepSWE-Preview-Q4_K_M.gguf",
+        "gx10": ""
+      }
+    },
+    {
+      "model_id": "deepseek/DeepSeek-V2.5-1210-AWQ",
+      "display_name": "DeepSeek V2.5 1210 AWQ",
+      "size_class": "large",
+      "parameter_count_b": null,
+      "model_paths": {
+        "spark": "/mnt/models/deepseek/DeepSeek-V2.5-1210-AWQ/files",
+        "gx10": "/mnt/models/deepseek/DeepSeek-V2.5-1210-AWQ/files"
+      }
+    },
+    {
+      "model_id": "mistral/Devstral-2-123B-Instruct-2512",
+      "display_name": "Devstral 2 123B Instruct 2512",
+      "size_class": "large",
+      "parameter_count_b": 123,
+      "model_paths": {
+        "spark": "/mnt/models/mistral/Devstral-2-123B-Instruct-2512/files",
+        "gx10": "/mnt/models/mistral/Devstral-2-123B-Instruct-2512/files"
+      }
+    },
+    {
+      "model_id": "mistral/Mistral-Large-Instruct-2411-AWQ",
+      "display_name": "Mistral Large Instruct 2411 AWQ",
+      "size_class": "large",
+      "parameter_count_b": null,
+      "model_paths": {
+        "spark": "/mnt/models/mistral/Mistral-Large-Instruct-2411-AWQ/files",
+        "gx10": "/mnt/models/mistral/Mistral-Large-Instruct-2411-AWQ/files"
+      }
+    },
+    {
+      "model_id": "mistral/Mixtral-8x22B-Instruct-v0.1-AWQ",
+      "display_name": "Mixtral 8x22B Instruct AWQ",
+      "size_class": "large",
+      "parameter_count_b": 176,
+      "model_paths": {
+        "spark": "/mnt/models/mistral/Mixtral-8x22B-Instruct-v0.1-AWQ/files",
+        "gx10": "/mnt/models/mistral/Mixtral-8x22B-Instruct-v0.1-AWQ/files"
+      }
+    },
+    {
+      "model_id": "mistral/Mixtral-8x22B-Instruct-v0.1-FP8",
+      "display_name": "Mixtral 8x22B Instruct FP8",
+      "size_class": "large",
+      "parameter_count_b": 176,
+      "model_paths": {
+        "spark": "/mnt/models/mistral/Mixtral-8x22B-Instruct-v0.1-FP8/files",
+        "gx10": "/mnt/models/mistral/Mixtral-8x22B-Instruct-v0.1-FP8/files"
+      }
+    },
+    {
+      "model_id": "nvidia/Llama-3.3-70B-Instruct-FP4",
+      "display_name": "Llama 3.3 70B Instruct FP4",
+      "size_class": "large",
+      "parameter_count_b": 70,
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Llama-3.3-70B-Instruct-FP4/files",
+        "gx10": "/mnt/models/nvidia/Llama-3.3-70B-Instruct-FP4/files"
+      }
+    },
+    {
+      "model_id": "nvidia/Qwen3-235B-A22B-NVFP4",
+      "display_name": "Qwen3 235B A22B NVFP4",
+      "size_class": "large",
+      "parameter_count_b": 235,
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Qwen3-235B-A22B-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/Qwen3-235B-A22B-NVFP4/files"
+      }
+    },
+    {
+      "model_id": "nvidia/Qwen3-30B-A3B-NVFP4",
+      "display_name": "Qwen3 30B A3B NVFP4",
+      "size_class": "mini",
+      "parameter_count_b": 30,
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Qwen3-30B-A3B-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/Qwen3-30B-A3B-NVFP4/files"
+      }
+    },
+    {
+      "model_id": "nvidia/Qwen3-32B-NVFP4",
+      "display_name": "Qwen3 32B NVFP4",
+      "size_class": "mini",
+      "parameter_count_b": 32,
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Qwen3-32B-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/Qwen3-32B-NVFP4/files"
+      }
+    },
+    {
+      "model_id": "openai/gpt-oss-120b",
+      "display_name": "GPT-OSS 120B",
+      "size_class": "large",
+      "parameter_count_b": 120,
+      "model_paths": {
+        "spark": "/mnt/models/openai/gpt-oss-120b/files/models--openai--gpt-oss-120b",
+        "gx10": "/mnt/models/openai/gpt-oss-120b/files/models--openai--gpt-oss-120b"
+      }
+    },
+    {
+      "model_id": "other/Llama-4-Scout-17B-16E-Instruct-Q4_K_M",
+      "display_name": "Llama 4 Scout 17B 16E Instruct Q4_K_M",
+      "size_class": "mini",
+      "parameter_count_b": 17,
+      "model_paths": {
+        "spark": "/mnt/models/other/Llama-4-Scout-17B-16E-Instruct-Q4_K_M/files/Llama-4-Scout-17B-16E-Instruct-Q4_K_M-00001-of-00002.gguf",
+        "gx10": ""
+      }
+    },
+    {
+      "model_id": "other/Qwen3-Coder-Next-Q4_K_M",
+      "display_name": "Qwen3 Coder Next Q4_K_M",
+      "size_class": "large",
+      "parameter_count_b": 80,
+      "model_paths": {
+        "spark": "/mnt/models/other/Qwen3-Coder-Next-Q4_K_M/files/Qwen3-Coder-Next-Q4_K_M.gguf",
+        "gx10": ""
+      }
+    },
+    {
+      "model_id": "qwen/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M",
+      "display_name": "DeepSeek R1 Distill Qwen 32B Q4_K_M",
+      "size_class": "mini",
+      "parameter_count_b": 32,
+      "model_paths": {
+        "spark": "/mnt/models/qwen/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M/files/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf",
+        "gx10": "/mnt/models/qwen/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M/files/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf"
+      }
+    },
+    {
+      "model_id": "qwen/DeepSeek-R1-Distill-Qwen-32B-Q6_K",
+      "display_name": "DeepSeek R1 Distill Qwen 32B Q6_K",
+      "size_class": "mini",
+      "parameter_count_b": 32,
+      "model_paths": {
+        "spark": "/mnt/models/qwen/DeepSeek-R1-Distill-Qwen-32B-Q6_K/files/DeepSeek-R1-Distill-Qwen-32B-Q6_K.gguf",
+        "gx10": "/mnt/models/qwen/DeepSeek-R1-Distill-Qwen-32B-Q6_K/files/DeepSeek-R1-Distill-Qwen-32B-Q6_K.gguf"
+      }
+    },
+    {
+      "model_id": "qwen/Qwen2.5-1.5B-Instruct",
+      "display_name": "Qwen2.5 1.5B Instruct",
+      "size_class": "mini",
+      "parameter_count_b": 1.5,
+      "model_paths": {
+        "spark": "/mnt/models/qwen/Qwen2.5-1.5B-Instruct/files",
+        "gx10": "/mnt/models/qwen/Qwen2.5-1.5B-Instruct/files"
+      }
+    },
+    {
+      "model_id": "qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
+      "display_name": "Qwen2.5 Coder 32B Instruct AWQ",
+      "size_class": "mini",
+      "parameter_count_b": 32,
+      "model_paths": {
+        "spark": "/mnt/models/qwen/Qwen2.5-Coder-32B-Instruct-AWQ/files",
+        "gx10": "/mnt/models/qwen/Qwen2.5-Coder-32B-Instruct-AWQ/files"
+      }
+    },
+    {
+      "model_id": "qwen/Qwen2.5-Math-72B-Instruct-Q4_K_M",
+      "display_name": "Qwen2.5 Math 72B Instruct Q4_K_M",
+      "size_class": "large",
+      "parameter_count_b": 72,
+      "model_paths": {
+        "spark": "/mnt/models/qwen/Qwen2.5-Math-72B-Instruct-Q4_K_M/files/Qwen2.5-Math-72B-Instruct-Q4_K_M.gguf",
+        "gx10": "/mnt/models/qwen/Qwen2.5-Math-72B-Instruct-Q4_K_M/files/Qwen2.5-Math-72B-Instruct-Q4_K_M.gguf"
+      }
+    },
+    {
+      "model_id": "qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M",
+      "display_name": "Qwen3 Next 80B A3B Instruct Q4_K_M",
+      "size_class": "large",
+      "parameter_count_b": 80,
+      "model_paths": {
+        "spark": "/mnt/models/qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M/files/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf",
+        "gx10": "/mnt/models/qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M/files/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf"
+      }
+    }
+  ]
+}
