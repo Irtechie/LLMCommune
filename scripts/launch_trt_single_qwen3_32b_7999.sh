@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PORT="${PORT:-8000}"
+export LANE_ID="${LANE_ID:-mini}"
+export PORT="${PORT:-7999}"
+export CONTAINER_NAME="${CONTAINER_NAME:-llm-trt-mini-7999}"
 export SLOT_LABEL="${SLOT_LABEL:-qwen3_32b_nvfp4}"
 export MODEL_SPEC="${MODEL_SPEC:-/mnt/models/nvidia/Qwen3-32B-NVFP4/files}"
 export DOCKER_IMAGE="${DOCKER_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6}"

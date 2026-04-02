@@ -1,0 +1,19 @@
+[Unit]
+Description=LLMCommune watchdog for controller and desired lane state
+After=network-online.target llmcommune-controller.service
+Wants=network-online.target llmcommune-controller.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/admin/apps/LLMCommune
+Environment=PORT=4000
+Environment=WATCHDOG_POLL_MS=5000
+Environment=WATCHDOG_ACTION_COOLDOWN_MS=30000
+ExecStart=/usr/bin/node /home/admin/apps/LLMCommune/src/watchdog.js
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/admin/apps/LLMCommune/workspace/runtime/watchdog-4000.log
+StandardError=append:/home/admin/apps/LLMCommune/workspace/runtime/watchdog-4000.log
+
+[Install]
+WantedBy=default.target

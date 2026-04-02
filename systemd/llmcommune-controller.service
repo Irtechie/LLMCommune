@@ -1,0 +1,17 @@
+[Unit]
+Description=LLMCommune controller on :4000
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/admin/apps/LLMCommune
+Environment=PORT=4000
+ExecStart=/usr/bin/node /home/admin/apps/LLMCommune/src/index.js
+Restart=always
+RestartSec=2
+StandardOutput=append:/home/admin/apps/LLMCommune/workspace/runtime/controller-4000.log
+StandardError=append:/home/admin/apps/LLMCommune/workspace/runtime/controller-4000.log
+
+[Install]
+WantedBy=default.target

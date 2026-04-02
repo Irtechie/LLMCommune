@@ -29,11 +29,10 @@
     "large": {
       "lane_id": "large",
       "display_name": "Large Lane",
-      "description": "Primary lane on spark. May host large or mini models, but only one profile at a time.",
+      "description": "Primary large-model lane on spark. Intended for one large profile at a time.",
       "host_id": "spark",
       "port": 8000,
       "allowed_size_classes": [
-        "mini",
         "large"
       ],
       "max_active_profiles": 1
@@ -50,6 +49,41 @@
       "max_active_profiles": 1
     }
   },
+  "fleet_profiles": [
+    {
+      "fleet_id": "mini_qwen30_deepseek32",
+      "display_name": "Mini Fleet: Qwen 30B + DeepSeek 32B",
+      "mode": "mini_pool",
+      "selection_role": "fleet_default",
+      "startup_expectation": {
+        "cold_start_s": 360,
+        "ready_timeout_s": 1200
+      },
+      "members": [
+        {
+          "member_id": "spark_qwen30",
+          "profile_id": "trt_single_qwen3_30b_a3b_mini",
+          "display_name": "Qwen3 30B A3B NVFP4",
+          "model_id": "nvidia/Qwen3-30B-A3B-NVFP4",
+          "runtime_family": "trtllm",
+          "host_id": "spark",
+          "port": 7999,
+          "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_single_qwen3_30b_a3b_7999.sh"
+        },
+        {
+          "member_id": "gx10_deepseek32",
+          "profile_id": "gguf_deepseek_32b_worker_fleet",
+          "display_name": "DeepSeek R1 Distill Qwen 32B Q4_K_M",
+          "model_id": "qwen/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M",
+          "runtime_family": "llama.cpp",
+          "host_id": "gx10",
+          "port": 7999,
+          "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_worker_deepseek_7999.sh"
+        }
+      ],
+      "notes": "One 32B-class mini per box. Intended for fleet-up mode only."
+    }
+  ],
   "profiles": [
     {
       "profile_id": "gguf_coder_next_large",
@@ -110,21 +144,21 @@
       "notes": "Large single-box GGUF lane on spark."
     },
     {
-      "profile_id": "trt_single_qwen3_30b_a3b_large",
+      "profile_id": "trt_single_qwen3_30b_a3b_mini",
       "display_name": "Qwen3 30B A3B NVFP4",
       "model_id": "nvidia/Qwen3-30B-A3B-NVFP4",
       "runtime_family": "trtllm",
       "size_class": "mini",
       "parameter_count_b": 30,
-      "default_lane": "large",
+      "default_lane": "mini",
       "allowed_lanes": [
-        "large"
+        "mini"
       ],
       "requires_both_boxes": false,
       "backing_hosts": [
         "spark"
       ],
-      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_single_qwen3_30b_a3b_8000.sh",
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_single_qwen3_30b_a3b_7999.sh",
       "startup_expectation": {
         "warm_switch_s": 30,
         "cold_start_s": 240,
@@ -136,24 +170,24 @@
       },
       "selection_role": "cli_candidate",
       "cli_selectable": true,
-      "notes": "Small-enough model, but the current wired TRT path serves it on the large lane."
+      "notes": "Mini TRT profile. Normal single-mini target on :7999."
     },
     {
-      "profile_id": "trt_single_qwen3_32b_large",
+      "profile_id": "trt_single_qwen3_32b_mini",
       "display_name": "Qwen3 32B NVFP4",
       "model_id": "nvidia/Qwen3-32B-NVFP4",
       "runtime_family": "trtllm",
       "size_class": "mini",
       "parameter_count_b": 32,
-      "default_lane": "large",
+      "default_lane": "mini",
       "allowed_lanes": [
-        "large"
+        "mini"
       ],
       "requires_both_boxes": false,
       "backing_hosts": [
         "spark"
       ],
-      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_single_qwen3_32b_8000.sh",
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_single_qwen3_32b_7999.sh",
       "startup_expectation": {
         "warm_switch_s": 30,
         "cold_start_s": 240,
@@ -165,37 +199,7 @@
       },
       "selection_role": "cli_candidate",
       "cli_selectable": true,
-      "notes": "Small-enough model, but the current wired TRT path serves it on the large lane."
-    },
-    {
-      "profile_id": "trt_dual_qwen235_large",
-      "display_name": "Qwen3 235B A22B NVFP4",
-      "model_id": "nvidia/Qwen3-235B-A22B-NVFP4",
-      "runtime_family": "trtllm",
-      "size_class": "large",
-      "parameter_count_b": 235,
-      "default_lane": "large",
-      "allowed_lanes": [
-        "large"
-      ],
-      "requires_both_boxes": true,
-      "backing_hosts": [
-        "spark",
-        "gx10"
-      ],
-      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_dual_qwen235_8000.sh",
-      "startup_expectation": {
-        "warm_switch_s": 45,
-        "cold_start_s": 420,
-        "ready_timeout_s": 900
-      },
-      "model_paths": {
-        "spark": "/mnt/models/nvidia/Qwen3-235B-A22B-NVFP4/files",
-        "gx10": "/mnt/models/nvidia/Qwen3-235B-A22B-NVFP4/files"
-      },
-      "selection_role": "cli_dual_candidate",
-      "cli_selectable": true,
-      "notes": "Reserves both boxes and serves through spark:8000."
+      "notes": "Mini TRT profile. Normal single-mini target on :7999."
     },
     {
       "profile_id": "trt_dual_gpt_oss_120b_large",
@@ -258,6 +262,36 @@
       "notes": "Reserves both boxes and serves through spark:8000."
     },
     {
+      "profile_id": "trt_dual_qwen235_large",
+      "display_name": "Qwen3 235B A22B NVFP4",
+      "model_id": "nvidia/Qwen3-235B-A22B-NVFP4",
+      "runtime_family": "trtllm",
+      "size_class": "large",
+      "parameter_count_b": 235,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": true,
+      "backing_hosts": [
+        "spark",
+        "gx10"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_dual_qwen235_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 60,
+        "cold_start_s": 300,
+        "ready_timeout_s": 1200
+      },
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Qwen3-235B-A22B-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/Qwen3-235B-A22B-NVFP4/files"
+      },
+      "selection_role": "manual_restore",
+      "cli_selectable": false,
+      "notes": "Guarded dual-box restore profile. Use only on the exact rc3 / 32768 / :8000 recipe."
+    },
+    {
       "profile_id": "gguf_deepseek_32b_mini",
       "display_name": "DeepSeek R1 Distill Qwen 32B Q4_K_M",
       "model_id": "qwen/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M",
@@ -287,6 +321,80 @@
       "notes": "Mini lane default. Keep reserved for Alpha unless explicitly overridden later."
     }
   ],
+  "profile_policy": {
+    "gguf_coder_next_large": {
+      "support_status": "proven_local",
+      "evidence_level": "local_and_official",
+      "recommended_action": "keep_active",
+      "official_max_context_tokens": 262144,
+      "recommended_context_tokens": 32768,
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Best default coding host and bonzai target."
+    },
+    "gguf_qwen3_next_80b_large": {
+      "support_status": "proven_local",
+      "evidence_level": "local_and_official",
+      "recommended_action": "keep_active",
+      "official_max_context_tokens": 262144,
+      "recommended_context_tokens": 65536,
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Single-box large reasoning lane."
+    },
+    "trt_single_qwen3_30b_a3b_mini": {
+      "support_status": "proven_local",
+      "evidence_level": "local_and_official",
+      "recommended_action": "keep_active",
+      "official_max_context_tokens": 131072,
+      "recommended_context_tokens": 32768,
+      "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6",
+      "runtime_notes": "Mini TRT lane; local logs show TRT adjusting to about 32800 tokens."
+    },
+    "trt_single_qwen3_32b_mini": {
+      "support_status": "proven_local",
+      "evidence_level": "local_and_official",
+      "recommended_action": "keep_active",
+      "official_max_context_tokens": 131072,
+      "recommended_context_tokens": 32768,
+      "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6",
+      "runtime_notes": "Mini TRT lane; treat YaRN-scale context as future work until revalidated locally."
+    },
+    "trt_dual_gpt_oss_120b_large": {
+      "support_status": "proven_local",
+      "evidence_level": "local_official_and_community",
+      "recommended_action": "keep_active",
+      "official_max_context_tokens": 131072,
+      "recommended_context_tokens": 131072,
+      "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6",
+      "runtime_notes": "Dual-box TRT lane. Use socket mode on the CX7 link."
+    },
+    "trt_dual_llama33_70b_large": {
+      "support_status": "proven_local",
+      "evidence_level": "local_and_official",
+      "recommended_action": "keep_active",
+      "official_max_context_tokens": 131072,
+      "recommended_context_tokens": 2048,
+      "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6",
+      "runtime_notes": "Dual-box TRT lane. Current stable launcher cap is conservative and should not be treated as the model ceiling."
+    },
+    "trt_dual_qwen235_large": {
+      "support_status": "manual_only_restore",
+      "evidence_level": "local_proof_exists_but_recipe_drifted",
+      "recommended_action": "restore_only_on_known_good_recipe",
+      "official_max_context_tokens": 131072,
+      "recommended_context_tokens": 32768,
+      "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.0.0rc3",
+      "runtime_notes": "Locally proven once on :8000 with rc3. Keep manual-only until it proves stable again on the exact known-good recipe."
+    },
+    "gguf_deepseek_32b_mini": {
+      "support_status": "proven_local_alpha_reserved",
+      "evidence_level": "local_and_official",
+      "recommended_action": "keep_reserved",
+      "official_max_context_tokens": 32768,
+      "recommended_context_tokens": 16384,
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Reasoning-heavy mini lane kept reserved for Alpha for now."
+    }
+  },
   "inventory_models": [
     {
       "model_id": "WizardLM/WizardLM-2-8x22B-AWQ",
@@ -487,6 +595,236 @@
         "spark": "/mnt/models/qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M/files/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf",
         "gx10": "/mnt/models/qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M/files/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf"
       }
+    }
+  ],
+  "inventory_policy": {
+    "WizardLM/WizardLM-2-8x22B-AWQ": {
+      "preferred_runtime": "vllm",
+      "topology_hint": "dual_box",
+      "support_status": "inventory_only",
+      "recommended_action": "park_until_vllm_lane_exists",
+      "recommended_context_tokens": 32768,
+      "notes": "Installed AWQ MoE. Do not promote until a real vLLM lane exists."
+    },
+    "agentica/DeepSWE-Preview-Q4_K_M": {
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "single_box",
+      "support_status": "inventory_only",
+      "recommended_action": "manual_only",
+      "recommended_context_tokens": 32768,
+      "notes": "Single-box coding GGUF. Not yet wired into the commune controller."
+    },
+    "deepseek/DeepSeek-V2.5-1210-AWQ": {
+      "preferred_runtime": "vllm",
+      "topology_hint": "dual_box",
+      "support_status": "inventory_only",
+      "recommended_action": "park_until_vllm_lane_exists",
+      "recommended_context_tokens": 32768,
+      "notes": "Installed AWQ checkpoint, but not currently part of the curated lane set."
+    },
+    "mistral/Devstral-2-123B-Instruct-2512": {
+      "preferred_runtime": "vllm",
+      "topology_hint": "dual_box",
+      "support_status": "inventory_only",
+      "recommended_action": "park_until_isolated_test",
+      "recommended_context_tokens": 32768,
+      "notes": "Large model with no current commune launcher."
+    },
+    "mistral/Mistral-Large-Instruct-2411-AWQ": {
+      "preferred_runtime": "vllm",
+      "topology_hint": "dual_box",
+      "support_status": "inventory_only",
+      "recommended_action": "park_until_vllm_lane_exists",
+      "recommended_context_tokens": 32768,
+      "notes": "Installed AWQ checkpoint with no current commune lane."
+    },
+    "mistral/Mixtral-8x22B-Instruct-v0.1-AWQ": {
+      "preferred_runtime": "vllm",
+      "topology_hint": "dual_box",
+      "support_status": "inventory_only",
+      "recommended_action": "park_until_vllm_lane_exists",
+      "recommended_context_tokens": 32768,
+      "notes": "MoE AWQ path. Keep as inventory until a real vLLM lane is promoted."
+    },
+    "mistral/Mixtral-8x22B-Instruct-v0.1-FP8": {
+      "preferred_runtime": "vllm",
+      "topology_hint": "dual_box",
+      "support_status": "inventory_only",
+      "recommended_action": "park_until_vllm_lane_exists",
+      "recommended_context_tokens": 32768,
+      "notes": "Installed FP8 path with no commune launcher."
+    },
+    "nvidia/Llama-3.3-70B-Instruct-FP4": {
+      "preferred_runtime": "trtllm",
+      "topology_hint": "dual_box",
+      "support_status": "proven_local",
+      "recommended_action": "keep_active",
+      "recommended_context_tokens": 2048,
+      "notes": "Dual-box TRT lane is locally proven on rc6."
+    },
+    "nvidia/Qwen3-235B-A22B-NVFP4": {
+      "preferred_runtime": "trtllm",
+      "topology_hint": "dual_box",
+      "support_status": "manual_only_restore",
+      "recommended_action": "restore_only_on_known_good_recipe",
+      "recommended_context_tokens": 32768,
+      "notes": "Locally proven on :8000 with rc3, but removed from the active lane after a later destabilizing rerun."
+    },
+    "nvidia/Qwen3-30B-A3B-NVFP4": {
+      "preferred_runtime": "trtllm",
+      "topology_hint": "single_box",
+      "support_status": "proven_local",
+      "recommended_action": "keep_active",
+      "recommended_context_tokens": 32768,
+      "notes": "Curated mini TRT lane."
+    },
+    "nvidia/Qwen3-32B-NVFP4": {
+      "preferred_runtime": "trtllm",
+      "topology_hint": "single_box",
+      "support_status": "proven_local",
+      "recommended_action": "keep_active",
+      "recommended_context_tokens": 32768,
+      "notes": "Curated mini TRT lane."
+    },
+    "openai/gpt-oss-120b": {
+      "preferred_runtime": "trtllm",
+      "topology_hint": "dual_box",
+      "support_status": "proven_local",
+      "recommended_action": "keep_active",
+      "recommended_context_tokens": 131072,
+      "notes": "Best current dual-box production lane on the pair."
+    },
+    "other/Llama-4-Scout-17B-16E-Instruct-Q4_K_M": {
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "single_box",
+      "support_status": "inventory_only",
+      "recommended_action": "candidate_for_future_mini_lane",
+      "recommended_context_tokens": 32768,
+      "notes": "Likely easy single-box lane once a second GGUF mini choice is wanted."
+    },
+    "other/Qwen3-Coder-Next-Q4_K_M": {
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "single_box",
+      "support_status": "proven_local",
+      "recommended_action": "keep_active",
+      "recommended_context_tokens": 32768,
+      "notes": "Current bonzai coding reset target."
+    },
+    "qwen/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M": {
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "single_box",
+      "support_status": "proven_local_alpha_reserved",
+      "recommended_action": "keep_reserved",
+      "recommended_context_tokens": 16384,
+      "notes": "Reasoning-heavy mini GGUF kept reserved for Alpha."
+    },
+    "qwen/DeepSeek-R1-Distill-Qwen-32B-Q6_K": {
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "single_box",
+      "support_status": "inventory_only",
+      "recommended_action": "manual_only",
+      "recommended_context_tokens": 16384,
+      "notes": "Heavier GGUF variant not wired into the commune controller."
+    },
+    "qwen/Qwen2.5-1.5B-Instruct": {
+      "preferred_runtime": "vllm",
+      "topology_hint": "single_box",
+      "support_status": "inventory_only",
+      "recommended_action": "park",
+      "recommended_context_tokens": 32768,
+      "notes": "Too small to matter for the current CLI proof path."
+    },
+    "qwen/Qwen2.5-Coder-32B-Instruct-AWQ": {
+      "preferred_runtime": "vllm",
+      "topology_hint": "single_box",
+      "support_status": "inventory_only",
+      "recommended_action": "strong_vllm_mini_candidate",
+      "recommended_context_tokens": 32768,
+      "notes": "Likely the best AWQ mini coding candidate once a vLLM lane is promoted."
+    },
+    "qwen/Qwen2.5-Math-72B-Instruct-Q4_K_M": {
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "single_box",
+      "support_status": "inventory_only",
+      "recommended_action": "manual_only",
+      "recommended_context_tokens": 32768,
+      "notes": "Large single-box GGUF; not part of the curated controller set."
+    },
+    "qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M": {
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "single_box",
+      "support_status": "proven_local",
+      "recommended_action": "keep_active",
+      "recommended_context_tokens": 65536,
+      "notes": "Curated single-box large reasoning lane."
+    }
+  },
+  "candidate_models": [
+    {
+      "model_id": "QuantTrio/Qwen3-VL-235B-A22B-Instruct-AWQ",
+      "display_name": "Qwen3 VL 235B A22B AWQ",
+      "preferred_runtime": "vllm",
+      "topology_hint": "dual_box",
+      "support_status": "community_proven_not_wired",
+      "recommended_action": "build_separate_vllm_test_lane",
+      "recommended_context_tokens": 32768,
+      "recommended_container": "nvcr.io/nvidia/vllm:25.11-py3 or newer validated community build",
+      "notes": "Strongest community-reported two-Spark Qwen235 path. Treat as a separate vLLM track, not a drop-in replacement for the current TRT lane."
+    },
+    {
+      "model_id": "RedHatAI/Qwen3-VL-235B-A22B-Instruct-NVFP4",
+      "display_name": "Qwen3 VL 235B A22B NVFP4",
+      "preferred_runtime": "vllm",
+      "topology_hint": "dual_box",
+      "support_status": "community_proven_not_wired",
+      "recommended_action": "build_separate_vllm_test_lane",
+      "recommended_context_tokens": 32768,
+      "recommended_container": "nvcr.io/nvidia/vllm:25.11-py3 or newer validated community build",
+      "notes": "Community-proven two-Spark path with lower throughput than AWQ, but still real."
+    },
+    {
+      "model_id": "nvidia/DeepSeek-V3.2-NVFP4",
+      "display_name": "DeepSeek V3.2 NVFP4",
+      "preferred_runtime": "trtllm",
+      "topology_hint": "download_only",
+      "support_status": "official_support_artifact_not_ready",
+      "recommended_action": "download_only",
+      "recommended_context_tokens": null,
+      "recommended_container": "future TensorRT-LLM release once public artifact path is complete",
+      "notes": "Official TRT support exists, but the public NVFP4 checkpoint path is still incomplete."
+    },
+    {
+      "model_id": "Qwen/Qwen3.5-397B-A17B-GPTQ-Int4",
+      "display_name": "Qwen3.5 397B A17B GPTQ Int4",
+      "preferred_runtime": "vllm",
+      "topology_hint": "dual_box_only",
+      "support_status": "community_proven_but_fragile",
+      "recommended_action": "download_only_recheck_later",
+      "recommended_context_tokens": 32768,
+      "recommended_container": "upstream or NVIDIA vLLM build validated against current Spark forum guidance",
+      "notes": "Real dual-Spark community runs exist. Fit math is plausible on two GX10s, but the path is still too brittle for the active controller."
+    },
+    {
+      "model_id": "LGAI-EXAONE/K-EXAONE-236B-A23B",
+      "display_name": "K-EXAONE 236B A23B",
+      "preferred_runtime": "trtllm",
+      "topology_hint": "download_only",
+      "support_status": "likely_fit_not_wired",
+      "recommended_action": "download_only_manual_research_candidate",
+      "recommended_context_tokens": 32768,
+      "recommended_container": "future validated TensorRT-LLM release",
+      "notes": "Very close to Qwen3-235B-A22B in total size and likely fits on two GX10s, but it is still outside the current curated controller set."
+    },
+    {
+      "model_id": "nvidia/Kimi-K2.5-NVFP4",
+      "display_name": "Kimi K2.5 NVFP4",
+      "preferred_runtime": "trtllm",
+      "topology_hint": "download_only",
+      "support_status": "too_large_for_two_gx10",
+      "recommended_action": "download_only",
+      "recommended_context_tokens": null,
+      "recommended_container": "future validated TensorRT-LLM release",
+      "notes": "Do not promote into the active controller. Published size is too large for a normal two-GX10 fit."
     }
   ]
 }

@@ -19,3 +19,15 @@ Move completed or superseded work here when [todo.md](/home/admin/apps/LLMCommun
 
 - [x] ~~Ignore libraries, build output, venvs, and workspace artifacts in Git.~~
   - Validation: [`.gitignore`](/home/admin/apps/LLMCommune/.gitignore) ignores `node_modules`, venvs, `site-packages`, `vendor`, `build`, `dist`, and `workspace/`.
+
+- [x] ~~Write a research-backed `modelstocheck.md` for the dual GX10 pair.~~
+  - Validation: [modelstocheck.md](/home/admin/apps/LLMCommune/modelstocheck.md) now captures official support, NVIDIA forum evidence, local proofs, and recommended restore/download-only policy.
+
+- [x] ~~Classify active and inventory models in the static registry.~~
+  - Validation: [models.json](/home/admin/apps/LLMCommune/src/config/models.json) now includes `profile_policy`, `inventory_policy`, and `candidate_models`.
+
+- [x] ~~Add troubleshooting metadata and report links to the live controller help JSON.~~
+  - Validation: `GET /api/llm-host/help` now exposes `troubleshooting` plus the `modelstocheck.md` path.
+
+- [x] ~~Retire the old TRT launcher extraction task by making the active commune launchers local.~~
+  - Validation: commune launcher scripts no longer call Alpha launch scripts; only the explicit Alpha stop helper still references Alpha paths.

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="/home/admin/apps/LLMCommune"
 PORT="${PORT:-7999}"
 
-for c in coder-deepseek-7999 llm-mini-7999; do
+for c in coder-deepseek-7999 llm-mini-7999 llm-trt-mini-7999; do
   docker rm -f "$c" >/dev/null 2>&1 || true
 done
 

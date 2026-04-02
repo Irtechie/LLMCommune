@@ -6,6 +6,21 @@ const repoRoot = "/home/admin/apps/LLMCommune";
 const runtime = createRuntime({ repoRoot });
 const port = Number(process.env.PORT || 4000);
 
+process.on("uncaughtException", (error) => {
+  console.error("[llmcommune] uncaughtException", error?.stack || error);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[llmcommune] unhandledRejection", reason);
+  process.exit(1);
+});
+
+process.on("SIGTERM", () => {
+  console.error("[llmcommune] received SIGTERM");
+  process.exit(143);
+});
+
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
   res.end(`${JSON.stringify(payload, null, 2)}\n`);
@@ -94,6 +109,22 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/bonzai") {
       sendJson(res, 200, await runtime.bonzai());
+      return;
+    }
+    if (req.method === "POST" && (url.pathname === "/fleet/up" || url.pathname === "/api/llm-host/fleet/up")) {
+      const body = await readJsonBody(req);
+      const payload = await runtime.fleetUp({
+        wait: Boolean(body.wait),
+      });
+      sendJson(res, payload.accepted ? 202 : 400, payload);
+      return;
+    }
+    if (req.method === "POST" && (url.pathname === "/fleet/down" || url.pathname === "/api/llm-host/fleet/down")) {
+      const body = await readJsonBody(req);
+      const payload = await runtime.fleetDown({
+        wait: Boolean(body.wait),
+      });
+      sendJson(res, payload.accepted ? 202 : 400, payload);
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/llm-host/snapshot") {
