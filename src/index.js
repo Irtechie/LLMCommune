@@ -74,6 +74,10 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, await runtime.listModels());
       return;
     }
+    if (req.method === "GET" && url.pathname === "/api/llm-host/startups") {
+      sendJson(res, 200, await runtime.getStartupCatalog());
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/api/llm-host/activate") {
       const body = await readJsonBody(req);
       const payload = await runtime.activate({

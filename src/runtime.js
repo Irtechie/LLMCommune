@@ -1,6 +1,6 @@
 import { exec as execCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -146,6 +146,41 @@ function isoNow() {
   return new Date().toISOString();
 }
 
+function parseTime(value) {
+  const text = String(value || "").trim();
+  if (!text) return 0;
+  const stamp = Date.parse(text);
+  return Number.isFinite(stamp) ? stamp : 0;
+}
+
+function sortNewestFirst(entries, keys = ["updated_at", "ready_at", "started_at"]) {
+  return [...entries].sort((left, right) => {
+    for (const key of keys) {
+      const delta = parseTime(right?.[key]) - parseTime(left?.[key]);
+      if (delta !== 0) return delta;
+    }
+    return 0;
+  });
+}
+
+function startupOutcome(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (!normalized) return "unknown";
+  if (normalized === "ready" || normalized === "api_ready") return "ready";
+  if (normalized === "inactive") return "inactive";
+  if (normalized.includes("failed") || normalized.includes("died")) return "failed";
+  if (
+    normalized.includes("wait") ||
+    normalized.includes("starting") ||
+    normalized.includes("started") ||
+    normalized.includes("submitted") ||
+    normalized.includes("grace")
+  ) {
+    return "in_progress";
+  }
+  return "unknown";
+}
+
 export function createRuntime({
   repoRoot,
   workerSsh = "admin@192.168.1.204",
@@ -157,6 +192,7 @@ export function createRuntime({
   const localLargeSlotPath = path.join(stateRoot, "large_slot.json");
   const localMiniSlotPath = path.join(stateRoot, "mini_slot.json");
   const desiredStatePath = path.join(stateRoot, "desired_state.json");
+  const startupCatalogPath = path.join(stateRoot, "startup_catalog.json");
   const activeManagedSlotPath = path.join(jobsStateRoot, "active_slot.json");
   const jobs = new Map();
   let cache = { ts: 0, value: null };
@@ -541,6 +577,7 @@ export function createRuntime({
     const miniLane = await resolveMiniLaneCurrent(config);
     const fleet = await resolveFleetState(config);
     const desiredState = await loadDesiredState();
+    const startupCatalog = await collectStartupCatalog(config);
     const largePayload = laneStatePayload(config, largeLane);
     const miniPayload = laneStatePayload(config, miniLane);
     return {
@@ -562,6 +599,14 @@ export function createRuntime({
         service_unit: "llmcommune-watchdog.service",
         controller_service_unit: "llmcommune-controller.service",
         policy: "Controller is always supervised. Lane and fleet restarts happen only when desired_state.watchdog_enforce=true and state=ready.",
+      },
+      startup_catalog: {
+        path: startupCatalogPath,
+        generated_at: startupCatalog.generated_at,
+        startup_count: startupCatalog.startup_count,
+        slot_count: startupCatalog.slot_count,
+        latest_ready_profiles: startupCatalog.latest_ready_profiles,
+        recent_startups: startupCatalog.recent_startups,
       },
       active_profiles: [largePayload, miniPayload].filter((entry) => entry.up && entry.profile_id),
       cli_target: largePayload.up && largePayload.profile_id ? {
@@ -609,6 +654,7 @@ export function createRuntime({
     const config = await loadConfig();
     const inventory = await collectInventory(config);
     const current = await currentState();
+    const startupCatalog = await collectStartupCatalog(config);
     const currentLarge = current.lanes.large;
     const currentMini = current.lanes.mini;
     const profiles = (config.profiles || []).map((rawProfile) => {
@@ -667,11 +713,18 @@ export function createRuntime({
       inventory_models: inventory,
       candidate_models: config.candidate_models || [],
       fleet_profiles: config.fleet_profiles || [],
+      startup_catalog: {
+        path: startupCatalogPath,
+        generated_at: startupCatalog.generated_at,
+        startup_count: startupCatalog.startup_count,
+        slot_count: startupCatalog.slot_count,
+      },
     };
   }
 
   async function helpState() {
     const config = await loadConfig();
+    const startupCatalog = await collectStartupCatalog(config);
     return {
       ok: true,
       generated_at: isoNow(),
@@ -680,7 +733,9 @@ export function createRuntime({
         static_models_json: path.join(repoRoot, "src", "config", "models.json"),
         live_models_endpoint: "/api/llm-host/models",
         live_current_endpoint: "/api/llm-host/current",
+        live_startups_endpoint: "/api/llm-host/startups",
         research_report: path.join(repoRoot, "modelstocheck.md"),
+        startup_catalog_json: startupCatalogPath,
       },
       response_contract: {
         current_fields: [
@@ -709,6 +764,20 @@ export function createRuntime({
           "recommended_context_tokens",
           "recommended_container",
         ],
+        startups_fields: [
+          "slot_label",
+          "profile_id",
+          "model_id",
+          "status",
+          "outcome",
+          "startup_attempt",
+          "started_at",
+          "ready_at",
+          "startup_duration_s",
+          "startup_state_path",
+          "slot_path",
+          "log_path",
+        ],
       },
       lane_policy: {
         summary: "Mode is exclusive: either one large profile on spark:8000, or mini-only mode on :7999 / fleet. The mini lane is :7999 on spark for one mini profile. Fleet mode may instead use spark:7999 plus gx10:7999 for one mini per box. Starting any large profile clears mini and fleet state first. Starting a mini profile clears the large lane first.",
@@ -719,6 +788,7 @@ export function createRuntime({
         controller_service_unit: "llmcommune-controller.service",
         watchdog_service_unit: "llmcommune-watchdog.service",
         desired_state_path: desiredStatePath,
+        startup_catalog_path: startupCatalogPath,
         behavior: [
           "The controller on :4000 is always supervised.",
           "Large or mini lanes are only restarted when desired_state says they should be up.",
@@ -856,9 +926,129 @@ export function createRuntime({
         "Mode is exclusive: one large profile on :8000, or mini-only mode on :7999 / fleet.",
         "Starting a large profile clears mini and fleet state first so the large model has the most context headroom possible on spark.",
         "Fleet mode is separate from the primary mini lane and is intended for one mini per box, not multiple 32B models on the same box.",
+        "Every startup attempt is cataloged under workspace/runtime/startup_catalog.json and exposed at /api/llm-host/startups so Alpha can read one stable history view.",
         "Use the live JSON endpoints over docs when there is any mismatch.",
       ],
     };
+  }
+
+  async function collectStartupCatalog(config) {
+    const dirents = await readdir(jobsStateRoot, { withFileTypes: true }).catch(() => []);
+    const slotSummaries = [];
+    const startups = [];
+
+    for (const dirent of dirents) {
+      if (!dirent.isDirectory()) continue;
+      if (dirent.name === "synapse") continue;
+      const slotDir = path.join(jobsStateRoot, dirent.name);
+      const slotPath = path.join(slotDir, "slot.json");
+      const slot = await readJson(slotPath, null);
+      const profile = findProfileForLane(config, {
+        slotLabel: slot?.slot_label || dirent.name,
+        modelSpec: slot?.model_spec || "",
+      });
+      const startupFiles = (await readdir(slotDir).catch(() => []))
+        .filter((name) => /^startup-state-.*\.json$/.test(name))
+        .sort();
+
+      const laneStartups = [];
+      for (const startupFile of startupFiles) {
+        const startupPath = path.join(slotDir, startupFile);
+        const startup = await readJson(startupPath, null);
+        if (!startup) continue;
+        const record = {
+          slot_label: String(startup.slot_label || slot?.slot_label || dirent.name),
+          slot_dir: dirent.name,
+          startup_state_path: startupPath,
+          slot_path: slotPath,
+          port: Number(startup.port || slot?.port || 0),
+          profile_id: String(profile?.profile_id || slot?.slot_label || ""),
+          display_name: String(profile?.display_name || ""),
+          model_id: String(profile?.model_id || slot?.model_spec || ""),
+          runtime_family: String(profile?.runtime_family || ""),
+          host_type: profile ? hostTypeForProfile(profile) : "",
+          host_pattern: profile ? hostPatternForProfile(config, profile) : "",
+          model_spec: String(slot?.model_spec || ""),
+          docker_image: String(slot?.docker_image || ""),
+          status: String(startup.status || ""),
+          outcome: startupOutcome(startup.status),
+          detail: String(startup.detail || ""),
+          phase_group: String(startup.phase_group || ""),
+          waiting_on: String(startup.waiting_on || ""),
+          startup_attempt: startup.startup_attempt ?? null,
+          started_at: String(startup.started_at || slot?.started_at || ""),
+          ready_at: String(startup.ready_at || slot?.ready_at || ""),
+          startup_duration_s: startup.startup_duration_s ?? slot?.startup_duration_s ?? null,
+          startup_elapsed_s: startup.startup_elapsed_s ?? null,
+          api_wait_elapsed_s: startup.api_wait_elapsed_s ?? null,
+          persistence_validation_elapsed_s: startup.persistence_validation_elapsed_s ?? null,
+          last_error: String(startup.last_error || slot?.last_error || ""),
+          log_path: String(startup.log_path || slot?.log_path || ""),
+          status_path: String(startup.status_path || slot?.status_path || ""),
+          pid_path: String(startup.pid_path || slot?.pid_path || ""),
+          updated_at: String(startup.updated_at || slot?.updated_at || ""),
+        };
+        laneStartups.push(record);
+        startups.push(record);
+      }
+
+      const latestStartup = sortNewestFirst(laneStartups)[0] || null;
+      slotSummaries.push({
+        slot_label: String(slot?.slot_label || dirent.name),
+        slot_dir: dirent.name,
+        slot_path: slotPath,
+        profile_id: String(profile?.profile_id || slot?.slot_label || ""),
+        display_name: String(profile?.display_name || ""),
+        model_id: String(profile?.model_id || slot?.model_spec || ""),
+        runtime_family: String(profile?.runtime_family || ""),
+        host_type: profile ? hostTypeForProfile(profile) : "",
+        host_pattern: profile ? hostPatternForProfile(config, profile) : "",
+        port: Number(slot?.port || latestStartup?.port || 0),
+        state: String(slot?.state || latestStartup?.status || ""),
+        active: Boolean(slot?.active),
+        docker_image: String(slot?.docker_image || ""),
+        model_spec: String(slot?.model_spec || ""),
+        started_at: String(slot?.started_at || latestStartup?.started_at || ""),
+        ready_at: String(slot?.ready_at || latestStartup?.ready_at || ""),
+        startup_duration_s: slot?.startup_duration_s ?? latestStartup?.startup_duration_s ?? null,
+        startup_state_path: String(slot?.startup_state_path || latestStartup?.startup_state_path || ""),
+        log_path: String(slot?.log_path || latestStartup?.log_path || ""),
+        status_path: String(slot?.status_path || latestStartup?.status_path || ""),
+        latest_startup: latestStartup,
+        startup_count: laneStartups.length,
+        updated_at: String(slot?.updated_at || latestStartup?.updated_at || ""),
+      });
+    }
+
+    const sortedStartups = sortNewestFirst(startups);
+    const sortedSlots = sortNewestFirst(slotSummaries);
+    const latestReadyProfiles = {};
+    for (const startup of sortedStartups) {
+      if (startup.outcome !== "ready") continue;
+      if (!startup.profile_id || latestReadyProfiles[startup.profile_id]) continue;
+      latestReadyProfiles[startup.profile_id] = {
+        ready_at: startup.ready_at,
+        startup_duration_s: startup.startup_duration_s,
+        startup_state_path: startup.startup_state_path,
+        slot_label: startup.slot_label,
+        port: startup.port,
+      };
+    }
+
+    const payload = {
+      ok: true,
+      generated_at: isoNow(),
+      catalog_path: startupCatalogPath,
+      lanes_root: jobsStateRoot,
+      slot_count: sortedSlots.length,
+      startup_count: sortedStartups.length,
+      latest_ready_profiles: latestReadyProfiles,
+      recent_startups: sortedStartups.slice(0, 20),
+      slots: sortedSlots,
+      startups: sortedStartups,
+    };
+    await writeJson(startupCatalogPath, payload);
+    return payload;
   }
 
   async function stopLane(laneId, { preserveDesiredState = false } = {}) {
@@ -1371,13 +1561,17 @@ export function createRuntime({
   }
 
   async function writeInventorySnapshot() {
+    const startups = await collectStartupCatalog(await loadConfig());
     const payload = {
       generated_at: isoNow(),
       current: await currentState(),
       models: await modelsState(),
+      startups,
     };
     const outputPath = path.join(repoRoot, "workspace", "current", "models.live.json");
+    const startupOutputPath = path.join(repoRoot, "workspace", "current", "startups.live.json");
     await writeJson(outputPath, payload);
+    await writeJson(startupOutputPath, startups);
     return payload;
   }
 
@@ -1385,6 +1579,9 @@ export function createRuntime({
     getHelp: helpState,
     getCurrent: currentState,
     listModels: modelsState,
+    getStartupCatalog() {
+      return loadConfig().then((config) => collectStartupCatalog(config));
+    },
     activate,
     restartLane,
     stopLane,

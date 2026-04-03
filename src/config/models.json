@@ -289,7 +289,7 @@
       },
       "selection_role": "manual_restore",
       "cli_selectable": false,
-      "notes": "Guarded dual-box restore profile. Use only on the exact rc3 / 32768 / :8000 recipe."
+      "notes": "Guarded dual-box restore profile. Use only on the exact rc3 / requested-131072 / :8000 recipe; TRT currently clamps the effective runtime limit lower on this hardware."
     },
     {
       "profile_id": "gguf_deepseek_32b_mini",
@@ -381,9 +381,9 @@
       "evidence_level": "local_proof_exists_but_recipe_drifted",
       "recommended_action": "restore_only_on_known_good_recipe",
       "official_max_context_tokens": 131072,
-      "recommended_context_tokens": 32768,
+      "recommended_context_tokens": 40960,
       "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.0.0rc3",
-      "runtime_notes": "Locally proven once on :8000 with rc3. Keep manual-only until it proves stable again on the exact known-good recipe."
+      "runtime_notes": "Latest local restore on rc3 requested 131072 tokens and came up successfully, but TRT clamped the effective runtime cap to about 40960 tokens on this dual-GX10 path."
     },
     "gguf_deepseek_32b_mini": {
       "support_status": "proven_local_alpha_reserved",

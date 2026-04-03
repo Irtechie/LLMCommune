@@ -6,6 +6,7 @@ Source of truth:
 - static registry: [`src/config/models.json`](/home/admin/apps/LLMCommune/src/config/models.json)
 - live current state: `GET /api/llm-host/current`
 - live profile and inventory view: `GET /api/llm-host/models`
+- live startup catalog: `GET /api/llm-host/startups`
 - deep compatibility and restore report: [`modelstocheck.md`](/home/admin/apps/LLMCommune/modelstocheck.md)
 
 Use the live JSON for runtime truth. Use `models.json` for the curated static contract: lanes, profiles, runtime families, parameter class, hosts, launch policy, and default wait times.
@@ -55,6 +56,7 @@ For restore or research work, use `modelstocheck.md` instead of guessing from th
 - `GET /api/llm-host/help`
 - `GET /api/llm-host/current`
 - `GET /api/llm-host/models`
+- `GET /api/llm-host/startups`
 - `POST /api/llm-host/activate`
 - `GET /api/llm-host/jobs/:job_id`
 - `POST /api/llm-host/actions/restart`
@@ -93,6 +95,8 @@ Runtime files:
 - `workspace/runtime/watchdog-4000.log`
 - `workspace/runtime/controller-4000.log`
 - `workspace/runtime/desired_state.json`
+- `workspace/runtime/startup_catalog.json`
+- `workspace/current/startups.live.json`
 
 ## How Another App Should Use It
 
@@ -120,6 +124,17 @@ Apps should also read the controller's classification fields instead of inferrin
 - `recommended_action`
 - `recommended_context_tokens`
 - `recommended_container`
+
+For historical startup/readback work, apps should prefer the consolidated startup catalog over scraping lane folders:
+- `GET /api/llm-host/startups`
+- `workspace/runtime/startup_catalog.json`
+- `workspace/current/startups.live.json`
+
+That catalog is the stable way for Alpha or another app to read:
+- every startup attempt
+- latest ready startup per profile
+- slot-to-profile mapping
+- the exact `startup-state-*.json` and log file that backed the attempt
 
 `GET /api/llm-host/models` now also exposes `candidate_models` for download-only or research-only tracks that should not be auto-promoted into the active lane list.
 
@@ -233,6 +248,16 @@ Controller behavior:
   - current launcher context window: `131072`
   - dual-box general assistant candidate
   - useful as a comparison option once the shared TRT lane is stable
+- `trt_dual_qwen235_large`
+  - runtime: `trtllm`
+  - host pattern: dual-box on `spark-f147` + `gx10-b041`
+  - lane: `large`
+  - serves on: `spark:8000`
+  - official max context window: `131072`
+  - current launcher requested context window: `131072`
+  - current effective runtime cap observed locally: about `40960`
+  - guarded manual-restore large lane
+  - latest local rc3 restore did come up at the higher request, but TRT clamped the actual runtime token budget lower on this hardware
 
 Source notes:
 - Qwen3-Coder-Next official card: coding agents, local development, tool use, long-horizon reasoning, CLI/IDE integration
@@ -266,7 +291,9 @@ Context note:
 - "current launcher context window" is what the current `LLMCommune` scripts are configured to serve today
 - for the single-box Qwen3 Next and Coder Next models, the official cards explicitly warn that `256K` may fail to start and recommend reducing to values like `32768` when memory is tight
 
-Unsafe / removed from active list:
+Manual-only restore:
 - `nvidia/Qwen3-235B-A22B-NVFP4`
-  - removed from the active `LLMCommune` large-lane profile list after a destabilizing dual-box TRT run
-  - keep as inventory only for now, not as a selectable CLI target
+  - active in the controller as `trt_dual_qwen235_large`
+  - not CLI-selectable by default
+  - use the exact rc3 restore path only
+  - latest local higher-context test requested `131072` and still loaded, but the effective TRT cap settled near `40960`
