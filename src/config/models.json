@@ -144,6 +144,35 @@
       "notes": "Large single-box GGUF lane on spark."
     },
     {
+      "profile_id": "gguf_gemma4_31b_large",
+      "display_name": "Gemma 4 31B GGUF",
+      "model_id": "google/gemma-4-31B-it",
+      "runtime_family": "llama.cpp",
+      "size_class": "large",
+      "parameter_count_b": 31,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_gemma4_31b_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 15,
+        "cold_start_s": 120,
+        "ready_timeout_s": 300
+      },
+      "model_paths": {
+        "spark": "/mnt/models/google/gemma-4-31B-it-GGUF/files/gemma-4-31B-it-Q4_K_M.gguf",
+        "gx10": ""
+      },
+      "selection_role": "cli_candidate",
+      "cli_selectable": true,
+      "notes": "Single-box Gemma 4 31B GGUF lane on spark. Includes local mmproj sidecar for image understanding."
+    },
+    {
       "profile_id": "trt_single_qwen3_30b_a3b_mini",
       "display_name": "Qwen3 30B A3B NVFP4",
       "model_id": "nvidia/Qwen3-30B-A3B-NVFP4",
@@ -251,7 +280,7 @@
       "startup_expectation": {
         "warm_switch_s": 45,
         "cold_start_s": 360,
-        "ready_timeout_s": 1200
+        "ready_timeout_s": 1800
       },
       "model_paths": {
         "spark": "/mnt/models/nvidia/Llama-3.3-70B-Instruct-FP4/files",
@@ -339,6 +368,15 @@
       "recommended_context_tokens": 65536,
       "recommended_container": "llama.cpp on host",
       "runtime_notes": "Single-box large reasoning lane."
+    },
+    "gguf_gemma4_31b_large": {
+      "support_status": "proven_local",
+      "evidence_level": "local_and_official",
+      "recommended_action": "keep_active",
+      "official_max_context_tokens": 262144,
+      "recommended_context_tokens": 262144,
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Single-box Gemma 4 31B GGUF lane with local mmproj sidecar for image understanding. Locally verified through 262144 context on one GB10."
     },
     "trt_single_qwen3_30b_a3b_mini": {
       "support_status": "proven_local",
@@ -467,6 +505,16 @@
       }
     },
     {
+      "model_id": "nvidia/Llama-3.1-8B-Instruct-NVFP4",
+      "display_name": "Llama 3.1 8B Instruct NVFP4",
+      "size_class": "mini",
+      "parameter_count_b": 8,
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Llama-3.1-8B-Instruct-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/Llama-3.1-8B-Instruct-NVFP4/files"
+      }
+    },
+    {
       "model_id": "nvidia/Llama-3.3-70B-Instruct-FP4",
       "display_name": "Llama 3.3 70B Instruct FP4",
       "size_class": "large",
@@ -474,6 +522,36 @@
       "model_paths": {
         "spark": "/mnt/models/nvidia/Llama-3.3-70B-Instruct-FP4/files",
         "gx10": "/mnt/models/nvidia/Llama-3.3-70B-Instruct-FP4/files"
+      }
+    },
+    {
+      "model_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+      "display_name": "NVIDIA Nemotron Nano 9B v2",
+      "size_class": "mini",
+      "parameter_count_b": 9,
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/NVIDIA-Nemotron-Nano-9B-v2/files",
+        "gx10": "/mnt/models/nvidia/NVIDIA-Nemotron-Nano-9B-v2/files"
+      }
+    },
+    {
+      "model_id": "nvidia/Qwen3-8B-NVFP4",
+      "display_name": "Qwen3 8B NVFP4",
+      "size_class": "mini",
+      "parameter_count_b": 8,
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Qwen3-8B-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/Qwen3-8B-NVFP4/files"
+      }
+    },
+    {
+      "model_id": "nvidia/Qwen3-14B-NVFP4",
+      "display_name": "Qwen3 14B NVFP4",
+      "size_class": "mini",
+      "parameter_count_b": 14,
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Qwen3-14B-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/Qwen3-14B-NVFP4/files"
       }
     },
     {
@@ -533,6 +611,16 @@
       "parameter_count_b": 80,
       "model_paths": {
         "spark": "/mnt/models/other/Qwen3-Coder-Next-Q4_K_M/files/Qwen3-Coder-Next-Q4_K_M.gguf",
+        "gx10": ""
+      }
+    },
+    {
+      "model_id": "google/gemma-4-31B-it",
+      "display_name": "Gemma 4 31B IT GGUF",
+      "size_class": "large",
+      "parameter_count_b": 31,
+      "model_paths": {
+        "spark": "/mnt/models/google/gemma-4-31B-it-GGUF/files/gemma-4-31B-it-Q4_K_M.gguf",
         "gx10": ""
       }
     },
@@ -662,6 +750,22 @@
       "recommended_context_tokens": 2048,
       "notes": "Dual-box TRT lane is locally proven on rc6."
     },
+    "nvidia/Llama-3.1-8B-Instruct-NVFP4": {
+      "preferred_runtime": "trtllm",
+      "topology_hint": "single_box",
+      "support_status": "inventory_only_downloaded",
+      "recommended_action": "prioritize_for_benchmark",
+      "recommended_context_tokens": 65536,
+      "notes": "Official NVIDIA 8B NVFP4 mini candidate with 128K context on the model card. Downloaded to both boxes; benchmark next."
+    },
+    "nvidia/NVIDIA-Nemotron-Nano-9B-v2": {
+      "preferred_runtime": "transformers",
+      "topology_hint": "single_box",
+      "support_status": "inventory_only_downloaded",
+      "recommended_action": "prioritize_for_benchmark",
+      "recommended_context_tokens": 65536,
+      "notes": "Official NVIDIA reasoning mini with 128K context and strong 128K RULER positioning. Downloaded to both boxes; runtime path still needs proving here."
+    },
     "nvidia/Qwen3-235B-A22B-NVFP4": {
       "preferred_runtime": "trtllm",
       "topology_hint": "dual_box",
@@ -669,6 +773,22 @@
       "recommended_action": "restore_only_on_known_good_recipe",
       "recommended_context_tokens": 32768,
       "notes": "Locally proven on :8000 with rc3, but removed from the active lane after a later destabilizing rerun."
+    },
+    "nvidia/Qwen3-8B-NVFP4": {
+      "preferred_runtime": "trtllm",
+      "topology_hint": "single_box",
+      "support_status": "inventory_only_downloaded",
+      "recommended_action": "prioritize_for_benchmark",
+      "recommended_context_tokens": 65536,
+      "notes": "Official NVIDIA 8B NVFP4 fast mini candidate with 131K context on the model card. Downloaded to both boxes."
+    },
+    "nvidia/Qwen3-14B-NVFP4": {
+      "preferred_runtime": "trtllm",
+      "topology_hint": "single_box",
+      "support_status": "inventory_only_downloaded",
+      "recommended_action": "prioritize_for_benchmark",
+      "recommended_context_tokens": 65536,
+      "notes": "Official NVIDIA 14B NVFP4 fast/high-context mini candidate with 131K context on the model card. Downloaded to both boxes."
     },
     "nvidia/Qwen3-30B-A3B-NVFP4": {
       "preferred_runtime": "trtllm",
@@ -710,13 +830,21 @@
       "recommended_context_tokens": 32768,
       "notes": "Current bonzai coding reset target."
     },
+    "google/gemma-4-31B-it": {
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "single_box",
+      "support_status": "proven_local",
+      "recommended_action": "keep_active",
+      "recommended_context_tokens": 262144,
+      "notes": "Curated single-box Gemma 4 31B GGUF lane on spark with mmproj sidecar for image understanding. Locally verified at 262144 context on one GB10."
+    },
     "qwen/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M": {
       "preferred_runtime": "llama.cpp",
       "topology_hint": "single_box",
       "support_status": "proven_local_alpha_reserved",
       "recommended_action": "keep_reserved",
       "recommended_context_tokens": 16384,
-      "notes": "Reasoning-heavy mini GGUF kept reserved for Alpha."
+      "notes": "Reasoning-heavy mini GGUF kept reserved for Alpha. Clean isolated retest averaged about 10 tok/s after fixing the mini-lane cleanup race."
     },
     "qwen/DeepSeek-R1-Distill-Qwen-32B-Q6_K": {
       "preferred_runtime": "llama.cpp",

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="/home/admin/apps/LLMCommune"
-PORT="${PORT:-7999}"
+PORT="${LLMCOMMUNE_WORKER_MINI_PORT:-7999}"
 WORKER_SSH="${WORKER_SSH:-admin@192.168.1.204}"
 WORKER_SSH_OPTS="${WORKER_SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /home/admin/.ssh/trtllm_ed25519}"
 

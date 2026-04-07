@@ -18,6 +18,8 @@ FREE_GPU_MEMORY_FRACTION="${FREE_GPU_MEMORY_FRACTION:-0.92}"
 FORCE_DOCKER_PULL="${FORCE_DOCKER_PULL:-0}"
 DOCKER_PULL_TIMEOUT_SECS="${DOCKER_PULL_TIMEOUT_SECS:-900}"
 API_READY_TIMEOUT_SECS="${API_READY_TIMEOUT_SECS:-600}"
+STARTUP_RETRIES="${STARTUP_RETRIES:-3}"
+RETRY_BACKOFF_SECS="${RETRY_BACKOFF_SECS:-15}"
 HOST_RUNTIME_ROOT="${HOST_RUNTIME_ROOT:-$ROOT/workspace/jobs/_lanes}"
 HOST_SLOT_DIR="${HOST_RUNTIME_ROOT}/${SLOT_LABEL}"
 HOST_LOG_PATH="${HOST_SLOT_DIR}/serve-${PORT}.log"
@@ -34,6 +36,33 @@ TIKTOKEN_RS_CACHE_DIR="${TIKTOKEN_RS_CACHE_DIR:-/tmp/harmony-reqs}"
 TIKTOKEN_CACHE_DIR="${TIKTOKEN_CACHE_DIR:-/tmp/tiktoken-cache}"
 TIKTOKEN_ENCODINGS_BASE="${TIKTOKEN_ENCODINGS_BASE:-/tmp/harmony-reqs}"
 TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"
+
+listener_pids() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -tiTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null | sort -u
+    return 0
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -Hlnpt "sport = :${PORT}" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u
+    return 0
+  fi
+  return 0
+}
+
+wait_for_port_release() {
+  local deadline=$((SECONDS + 90))
+  while (( SECONDS < deadline )); do
+    local port_open="0"
+    if listener_pids | grep -q .; then
+      port_open="1"
+    fi
+    if [[ "$port_open" == "0" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
 
 log() {
   printf '[trtllm-single] %s\n' "$*" >&2
@@ -189,29 +218,55 @@ wait_for_api_ready() {
   return 1
 }
 
-if [[ "$LANE_ID" == "mini" ]]; then
-  bash "$ROOT/scripts/stop_mini_lane.sh" >/dev/null 2>&1 || true
-else
-  bash "$ROOT/scripts/stop_large_lane.sh" >/dev/null 2>&1 || true
-fi
-write_slot_state "starting" false "launching single-box TRT lane"
-record_status "launch requested for $MODEL_SPEC"
+attempt=1
+while [[ "$attempt" -le "$STARTUP_RETRIES" ]]; do
+  if [[ "$LANE_ID" == "mini" ]]; then
+    bash "$ROOT/scripts/stop_mini_lane.sh" >/dev/null 2>&1 || true
+  else
+    bash "$ROOT/scripts/stop_large_lane.sh" >/dev/null 2>&1 || true
+  fi
+  if ! wait_for_port_release >/dev/null 2>&1; then
+    write_slot_state "failed" false "port ${PORT} did not clear before launch attempt ${attempt}"
+    record_status "port ${PORT} did not clear before launch attempt ${attempt}"
+    if [[ "$attempt" -ge "$STARTUP_RETRIES" ]]; then
+      exit 1
+    fi
+    sleep "$RETRY_BACKOFF_SECS"
+    attempt=$((attempt + 1))
+    continue
+  fi
 
-if ! launch_container >/dev/null; then
-  write_slot_state "failed" false "container launch failed"
-  record_status "container launch failed"
-  exit 1
-fi
+  write_slot_state "starting" false "launching single-box TRT lane attempt ${attempt}/${STARTUP_RETRIES}"
+  record_status "launch requested for $MODEL_SPEC attempt=${attempt}"
 
-record_status "container launched; waiting for API"
-if ! wait_for_api_ready; then
+  if ! launch_container >/dev/null; then
+    write_slot_state "failed" false "container launch failed on attempt ${attempt}"
+    record_status "container launch failed on attempt ${attempt}"
+    if [[ "$attempt" -ge "$STARTUP_RETRIES" ]]; then
+      exit 1
+    fi
+    sleep "$RETRY_BACKOFF_SECS"
+    attempt=$((attempt + 1))
+    continue
+  fi
+
+  record_status "container launched; waiting for API attempt=${attempt}"
+  if wait_for_api_ready; then
+    write_slot_state "ready" true "api responsive and process alive"
+    mark_other_slots_inactive
+    record_status "runtime ready on :${PORT}"
+    log "single-box TRT lane ready for ${MODEL_SPEC} on :${PORT}"
+    exit 0
+  fi
+
   cleanup_failed_container
-  write_slot_state "failed" false "runtime did not become ready"
-  record_status "runtime did not become ready"
-  exit 1
-fi
+  write_slot_state "failed" false "runtime did not become ready on attempt ${attempt}"
+  record_status "runtime did not become ready on attempt ${attempt}"
+  if [[ "$attempt" -ge "$STARTUP_RETRIES" ]]; then
+    exit 1
+  fi
+  sleep "$RETRY_BACKOFF_SECS"
+  attempt=$((attempt + 1))
+done
 
-write_slot_state "ready" true "api responsive and process alive"
-mark_other_slots_inactive
-record_status "runtime ready on :${PORT}"
-log "single-box TRT lane ready for ${MODEL_SPEC} on :${PORT}"
+exit 1

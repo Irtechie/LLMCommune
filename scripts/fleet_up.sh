@@ -25,6 +25,7 @@ wait_for_models() {
 
 bash "$ROOT/scripts/stop_large_lane.sh" >/dev/null 2>&1 || true
 bash "$ROOT/scripts/fleet_down.sh" >/dev/null 2>&1 || true
+bash "$ROOT/scripts/stop_mini_lane.sh" >/dev/null 2>&1 || true
 
 bash "$QWEN_LAUNCHER"
 wait_for_models "$QWEN_BASE_URL" "spark qwen mini"

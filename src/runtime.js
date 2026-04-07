@@ -96,9 +96,9 @@ function runDetachedCommand(command, cwd) {
   }
 }
 
-async function fetchJson(url, timeoutMs = 3000) {
+async function fetchJson(url, timeoutMs = 3000, fetchImpl = fetch) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) return { ok: false, status: response.status, body: null };
     return { ok: true, status: response.status, body: await response.json() };
   } catch (error) {
@@ -106,8 +106,8 @@ async function fetchJson(url, timeoutMs = 3000) {
   }
 }
 
-async function probeRuntime(baseUrl) {
-  const models = await fetchJson(`${normalizeBaseUrl(baseUrl)}/v1/models`, 2500);
+async function probeRuntime(baseUrl, fetchJsonImpl = fetchJson) {
+  const models = await fetchJsonImpl(`${normalizeBaseUrl(baseUrl)}/v1/models`, 2500);
   if (models.ok) {
     const rows = Array.isArray(models.body?.data)
       ? models.body.data
@@ -123,7 +123,7 @@ async function probeRuntime(baseUrl) {
       raw: models.body,
     };
   }
-  const health = await fetchJson(`${normalizeBaseUrl(baseUrl)}/health`, 1500);
+  const health = await fetchJsonImpl(`${normalizeBaseUrl(baseUrl)}/health`, 1500);
   return {
     up: Boolean(health.ok),
     model_ids: [],
@@ -150,38 +150,50 @@ export function createRuntime({
   repoRoot,
   workerSsh = "admin@192.168.1.204",
   workerSshOptions = "-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /home/admin/.ssh/trtllm_ed25519",
+  dependencies = {},
+  paths = {},
 } = {}) {
-  const configPath = path.join(repoRoot, "src", "config", "models.json");
-  const stateRoot = path.join(repoRoot, "workspace", "runtime");
-  const jobsStateRoot = path.join(repoRoot, "workspace", "jobs", "_lanes");
-  const localLargeSlotPath = path.join(stateRoot, "large_slot.json");
-  const localMiniSlotPath = path.join(stateRoot, "mini_slot.json");
-  const desiredStatePath = path.join(stateRoot, "desired_state.json");
-  const activeManagedSlotPath = path.join(jobsStateRoot, "active_slot.json");
+  const runCommandImpl = dependencies.runCommand || runCommand;
+  const runDetachedCommandImpl = dependencies.runDetachedCommand || runDetachedCommand;
+  const fetchJsonImpl = dependencies.fetchJson || fetchJson;
+  const probeRuntimeImpl = dependencies.probeRuntime || ((baseUrl) => probeRuntime(baseUrl, fetchJsonImpl));
+  const readJsonImpl = dependencies.readJson || readJson;
+  const writeJsonImpl = dependencies.writeJson || writeJson;
+  const sleepImpl = dependencies.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const nowMs = dependencies.nowMs || (() => Date.now());
+  const uuid = dependencies.uuid || randomUUID;
+  const configPath = paths.configPath || path.join(repoRoot, "src", "config", "models.json");
+  const stateRoot = paths.stateRoot || path.join(repoRoot, "workspace", "runtime");
+  const jobsStateRoot = paths.jobsStateRoot || path.join(repoRoot, "workspace", "jobs", "_lanes");
+  const localLargeSlotPath = paths.localLargeSlotPath || path.join(stateRoot, "large_slot.json");
+  const localMiniSlotPath = paths.localMiniSlotPath || path.join(stateRoot, "mini_slot.json");
+  const desiredStatePath = paths.desiredStatePath || path.join(stateRoot, "desired_state.json");
+  const activeManagedSlotPath = paths.activeManagedSlotPath || path.join(jobsStateRoot, "active_slot.json");
   const jobs = new Map();
   let cache = { ts: 0, value: null };
+  const currentIso = () => new Date(nowMs()).toISOString();
 
   function defaultDesiredState() {
     return {
       mode: "idle",
       state: "idle",
       watchdog_enforce: false,
-      lane_targets: {
-        large: "",
-        mini: "",
-      },
-      fleet_id: "",
-      status_detail: "",
-      updated_at: isoNow(),
+        lane_targets: {
+          large: "",
+          mini: "",
+        },
+        fleet_id: "",
+        status_detail: "",
+      updated_at: currentIso(),
     };
   }
 
   async function loadConfig() {
-    return readJson(configPath, {});
+    return readJsonImpl(configPath, {});
   }
 
   async function loadDesiredState() {
-    const desired = await readJson(desiredStatePath, defaultDesiredState());
+    const desired = await readJsonImpl(desiredStatePath, defaultDesiredState());
     return {
       ...defaultDesiredState(),
       ...desired,
@@ -200,16 +212,16 @@ export function createRuntime({
         ...defaultDesiredState().lane_targets,
         ...(nextState?.lane_targets || {}),
       },
-      updated_at: isoNow(),
+      updated_at: currentIso(),
     };
-    await writeJson(desiredStatePath, payload);
+    await writeJsonImpl(desiredStatePath, payload);
     return payload;
   }
 
   async function remotePathExists(remotePath) {
     const target = String(remotePath || "").trim();
     if (!target) return false;
-    const result = await runCommand(
+    const result = await runCommandImpl(
       `ssh ${workerSshOptions} ${shellQuote(workerSsh)} ${shellQuote(`bash -lc ${shellQuote(`test -e ${shellQuote(target)}`)}`)}`,
       60000,
     );
@@ -219,15 +231,15 @@ export function createRuntime({
   async function pathExists(localPath) {
     const target = String(localPath || "").trim();
     if (!target) return false;
-    const result = await runCommand(`[ -e ${shellQuote(target)} ]`, 15000);
+    const result = await runCommandImpl(`[ -e ${shellQuote(target)} ]`, 15000);
     return Boolean(result.ok);
   }
 
   async function listContainers(remote = false) {
     const cmd = "docker ps --format '{{.Names}}|{{.Image}}|{{.Ports}}'";
     const result = remote
-      ? await runCommand(`ssh ${workerSshOptions} ${shellQuote(workerSsh)} ${shellQuote(cmd)}`, 30000)
-      : await runCommand(cmd, 30000);
+      ? await runCommandImpl(`ssh ${workerSshOptions} ${shellQuote(workerSsh)} ${shellQuote(cmd)}`, 30000)
+      : await runCommandImpl(cmd, 30000);
     if (!result.ok) return [];
     return String(result.stdout || "")
       .split(/\r?\n/)
@@ -239,8 +251,43 @@ export function createRuntime({
       });
   }
 
+  async function workerPortResponsive(port) {
+    const host = "192.168.1.204";
+    const probe = await probeRuntimeImpl(`http://${host}:${Number(port)}`);
+    return Boolean(probe.up);
+  }
+
+  async function workerClearState() {
+    const remoteContainers = await listContainers(true);
+    const managedNames = new Set([
+      "trtllm-multinode",
+      "llm-shared",
+      "coder-main-8000",
+      "vllm",
+      "llmcommune-worker-deepseek-7999",
+      "coder-deepseek-7999",
+      "llm-mini-7999",
+      "llm-trt-mini-7999",
+    ]);
+    const blockingContainers = remoteContainers
+      .filter((entry) => managedNames.has(String(entry.name || "")))
+      .map((entry) => String(entry.name || ""))
+      .filter(Boolean);
+    const responsivePorts = [];
+    for (const port of [7999, 8000]) {
+      if (await workerPortResponsive(port)) {
+        responsivePorts.push(port);
+      }
+    }
+    return {
+      clear: blockingContainers.length === 0 && responsivePorts.length === 0,
+      blocking_containers: blockingContainers,
+      responsive_ports: responsivePorts,
+    };
+  }
+
   async function collectInventory(config) {
-    const now = Date.now();
+    const now = nowMs();
     if (cache.value && now - cache.ts < 30000) return cache.value;
     const rows = [];
     const inventoryPolicy = config.inventory_policy || {};
@@ -293,14 +340,21 @@ export function createRuntime({
   async function resolveLargeLaneCurrent(config) {
     const lane = config.lanes?.large || {};
     const baseUrl = `http://${config.hosts?.spark?.public_host || "127.0.0.1"}:${lane.port || 8000}`;
-    const probe = await probeRuntime(`http://127.0.0.1:${lane.port || 8000}`);
-    const localSlot = await readJson(localLargeSlotPath, {});
-    const activeManagedSlot = await readJson(activeManagedSlotPath, {});
+    const probe = await probeRuntimeImpl(`http://127.0.0.1:${lane.port || 8000}`);
+    const localSlot = await readJsonImpl(localLargeSlotPath, {});
+    const activeManagedSlot = await readJsonImpl(activeManagedSlotPath, {});
     const lanePort = Number(lane.port || 8000);
     const managedSlotMatchesLane = Number(activeManagedSlot?.port || 0) === lanePort;
-    const slotRecord = managedSlotMatchesLane ? activeManagedSlot : localSlot;
+    const localSlotPopulated = Boolean(localSlot?.profile_id || localSlot?.slot_label || localSlot?.model_spec);
+    const managedSlotPopulated = Boolean(activeManagedSlot?.profile_id || activeManagedSlot?.slot_label || activeManagedSlot?.model_spec);
+    const slotRecord = localSlotPopulated
+      ? localSlot
+      : managedSlotMatchesLane && managedSlotPopulated
+        ? activeManagedSlot
+        : localSlot;
     const slotLabel = String(
-      (managedSlotMatchesLane ? activeManagedSlot?.slot_label : "") ||
+      (localSlotPopulated ? (localSlot?.profile_id || localSlot?.slot_label) : "") ||
+      (managedSlotMatchesLane ? activeManagedSlot?.profile_id || activeManagedSlot?.slot_label : "") ||
       localSlot?.slot_label ||
       "",
     ).trim();
@@ -324,12 +378,18 @@ export function createRuntime({
   async function resolveMiniLaneCurrent(config) {
     const lane = config.lanes?.mini || {};
     const baseUrl = `http://${config.hosts?.spark?.public_host || "127.0.0.1"}:${lane.port || 7999}`;
-    const probe = await probeRuntime(`http://127.0.0.1:${lane.port || 7999}`);
-    const localSlot = await readJson(localMiniSlotPath, {});
-    const activeManagedSlot = await readJson(activeManagedSlotPath, {});
+    const probe = await probeRuntimeImpl(`http://127.0.0.1:${lane.port || 7999}`);
+    const localSlot = await readJsonImpl(localMiniSlotPath, {});
+    const activeManagedSlot = await readJsonImpl(activeManagedSlotPath, {});
     const lanePort = Number(lane.port || 7999);
     const managedSlotMatchesLane = Number(activeManagedSlot?.port || 0) === lanePort;
-    const slotRecord = managedSlotMatchesLane ? activeManagedSlot : localSlot;
+    const localSlotPopulated = Boolean(localSlot?.profile_id || localSlot?.slot_label || localSlot?.model_spec);
+    const managedSlotPopulated = Boolean(activeManagedSlot?.profile_id || activeManagedSlot?.slot_label || activeManagedSlot?.model_spec);
+    const slotRecord = localSlotPopulated
+      ? localSlot
+      : managedSlotMatchesLane && managedSlotPopulated
+        ? activeManagedSlot
+        : localSlot;
     const profile = findProfileForLane(config, {
       slotLabel: slotRecord?.profile_id || slotRecord?.slot_label || "",
       modelSpec: slotRecord?.model_spec || "",
@@ -363,7 +423,7 @@ export function createRuntime({
     for (const member of fleet.members || []) {
       const host = config.hosts?.[member.host_id || "spark"] || {};
       const baseUrl = `http://${host.public_host || "127.0.0.1"}:${member.port || 7999}`;
-      const probe = await probeRuntime(baseUrl);
+      const probe = await probeRuntimeImpl(baseUrl);
       members.push({
         member_id: String(member.member_id || ""),
         profile_id: String(member.profile_id || ""),
@@ -484,8 +544,143 @@ export function createRuntime({
     };
   }
 
+  function desiredReadyTimeoutMs(config, desiredState) {
+    const desired = desiredState || {};
+    if (String(desired.mode || "") === "fleet" && desired.fleet_id) {
+      const fleet = (config.fleet_profiles || []).find((entry) => String(entry?.fleet_id || "") === String(desired.fleet_id || ""));
+      return Number(fleet?.startup_expectation?.ready_timeout_s || 1200) * 1000;
+    }
+    const targets = [desired?.lane_targets?.large, desired?.lane_targets?.mini]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    const targetProfile = targets
+      .map((profileId) => profileById(config, profileId))
+      .find(Boolean);
+    return Number(targetProfile?.startup_expectation?.ready_timeout_s || 900) * 1000;
+  }
+
+  function normalizeDesiredState(config, desiredState, snapshot) {
+    const desired = {
+      ...defaultDesiredState(),
+      ...(desiredState || {}),
+      lane_targets: {
+        ...defaultDesiredState().lane_targets,
+        ...(desiredState?.lane_targets || {}),
+      },
+    };
+    let changed = false;
+    let normalized = desired;
+
+    const largeTarget = String(desired?.lane_targets?.large || "").trim();
+    const miniTarget = String(desired?.lane_targets?.mini || "").trim();
+    const fleetTarget = String(desired?.fleet_id || "").trim();
+    const desiredUpdatedAtMs = Date.parse(String(desired.updated_at || ""));
+    const ageMs = Number.isFinite(desiredUpdatedAtMs) ? Math.max(0, nowMs() - desiredUpdatedAtMs) : 0;
+    const timeoutMs = desiredReadyTimeoutMs(config, desired) + 60000;
+    const largeUp = Boolean(snapshot?.large?.up);
+    const miniUp = Boolean(snapshot?.mini?.up);
+    const fleetUp = Boolean(snapshot?.fleet?.up);
+    const anyUp = largeUp || miniUp || fleetUp;
+
+    const apply = (patch) => {
+      changed = true;
+      normalized = {
+        ...desired,
+        ...patch,
+        lane_targets: {
+          ...defaultDesiredState().lane_targets,
+          ...(desired.lane_targets || {}),
+          ...(patch?.lane_targets || {}),
+        },
+        updated_at: currentIso(),
+      };
+    };
+
+    if (String(desired.mode || "") === "lane") {
+      if (
+        largeTarget &&
+        largeUp &&
+        String(snapshot?.large?.profile_id || "") === largeTarget &&
+        !miniUp &&
+        !fleetUp &&
+        (
+          String(desired.state || "") !== "ready" ||
+          !desired.watchdog_enforce ||
+          String(desired.mode || "") !== "lane" ||
+          String(desired.fleet_id || "") !== ""
+        )
+      ) {
+        apply({
+          state: "ready",
+          watchdog_enforce: true,
+          fleet_id: "",
+          status_detail: `${largeTarget} ready on large`,
+        });
+      } else if (
+        miniTarget &&
+        miniUp &&
+        String(snapshot?.mini?.profile_id || "") === miniTarget &&
+        !largeUp &&
+        !fleetUp &&
+        (
+          String(desired.state || "") !== "ready" ||
+          !desired.watchdog_enforce ||
+          String(desired.mode || "") !== "lane" ||
+          String(desired.fleet_id || "") !== ""
+        )
+      ) {
+        apply({
+          state: "ready",
+          watchdog_enforce: true,
+          fleet_id: "",
+          status_detail: `${miniTarget} ready on mini`,
+        });
+      }
+    }
+
+    if (
+      !changed &&
+      String(desired.mode || "") === "fleet" &&
+      fleetTarget &&
+      fleetUp &&
+      String(snapshot?.fleet?.fleet_id || "") === fleetTarget &&
+      !largeUp &&
+      !miniUp &&
+      (
+        String(desired.state || "") !== "ready" ||
+        !desired.watchdog_enforce
+      )
+    ) {
+      apply({
+        state: "ready",
+        watchdog_enforce: true,
+        status_detail: `fleet ${fleetTarget} ready`,
+      });
+    }
+
+    if (!changed && ["starting", "stopping", "running"].includes(String(desired.state || "")) && !anyUp && ageMs > timeoutMs) {
+      apply({
+        state: "failed",
+        watchdog_enforce: false,
+        status_detail: desired.status_detail || "desired state expired without an active runtime",
+      });
+    }
+
+    if (!changed && !anyUp && !largeTarget && !miniTarget && !fleetTarget &&
+      (String(desired.mode || "") !== "idle" || String(desired.state || "") !== "idle" || Boolean(desired.watchdog_enforce))) {
+      changed = true;
+      normalized = {
+        ...defaultDesiredState(),
+        updated_at: currentIso(),
+      };
+    }
+
+    return { desiredState: normalized, changed };
+  }
+
   function laneStatePayload(config, laneState) {
-    const profile = withProfilePolicy(config, laneState.profile);
+    const profile = laneState.up ? withProfilePolicy(config, laneState.profile) : null;
+    const modelIds = Array.isArray(laneState?.model_ids) ? laneState.model_ids : [];
     const adapter = profile ? adapterForProfile(config, profile) : buildAdapter("unknown", laneState.base_url, "No active profile detected.");
     const callTarget = profile ? callTargetForProfile(config, profile) : {
       host_type: "single_box",
@@ -510,10 +705,10 @@ export function createRuntime({
       host_display_name: config.hosts?.[laneState.host_id]?.display_name || laneState.host_id,
       port: laneState.port,
       base_url: laneState.base_url,
-      model_ids: laneState.model_ids,
+      model_ids: modelIds,
       profile_id: profile?.profile_id || "",
       display_name: profile?.display_name || "",
-      model_id: profile?.model_id || (laneState.model_ids[0] || ""),
+      model_id: profile?.model_id || (modelIds[0] || ""),
       runtime_family: profile?.runtime_family || "unknown",
       host_type: profile ? hostTypeForProfile(profile) : callTarget.host_type,
       host_pattern: profile ? hostPatternForProfile(config, profile) : callTarget.host_pattern,
@@ -540,12 +735,20 @@ export function createRuntime({
     const largeLane = await resolveLargeLaneCurrent(config);
     const miniLane = await resolveMiniLaneCurrent(config);
     const fleet = await resolveFleetState(config);
-    const desiredState = await loadDesiredState();
     const largePayload = laneStatePayload(config, largeLane);
     const miniPayload = laneStatePayload(config, miniLane);
+    const loadedDesiredState = await loadDesiredState();
+    const normalizedDesired = normalizeDesiredState(config, loadedDesiredState, {
+      large: largePayload,
+      mini: miniPayload,
+      fleet,
+    });
+    const desiredState = normalizedDesired.changed
+      ? await saveDesiredState(normalizedDesired.desiredState)
+      : normalizedDesired.desiredState;
     return {
       ok: true,
-      generated_at: isoNow(),
+      generated_at: currentIso(),
       controller: {
         name: config.controller?.name || "LLMCommune",
         base_url: config.controller?.public_base_url || "http://192.168.1.203:4000",
@@ -609,6 +812,7 @@ export function createRuntime({
     const config = await loadConfig();
     const inventory = await collectInventory(config);
     const current = await currentState();
+    const workerState = await workerClearState();
     const currentLarge = current.lanes.large;
     const currentMini = current.lanes.mini;
     const profiles = (config.profiles || []).map((rawProfile) => {
@@ -619,12 +823,12 @@ export function createRuntime({
       const lane = config.lanes?.[defaultLane] || {};
       const currentLane = defaultLane === "large" ? currentLarge : currentMini;
       const currentOther = defaultLane === "large" ? currentMini : currentLarge;
-      const sameProfile = currentLane.profile_id && currentLane.profile_id === profile.profile_id;
+      const sameProfile = Boolean(currentLane.up && currentLane.profile_id && currentLane.profile_id === profile.profile_id);
       const blockedBy = [];
       const wouldPreempt = [];
       const adapter = adapterForProfile(config, profile);
       const callTarget = callTargetForProfile(config, profile);
-      if (currentLane.profile_id && !sameProfile) {
+      if (currentLane.up && currentLane.profile_id && !sameProfile) {
         blockedBy.push(currentLane.profile_id);
         wouldPreempt.push(currentLane.profile_id);
       }
@@ -636,6 +840,9 @@ export function createRuntime({
       if (current.mini_fleet?.up) {
         blockedBy.push(current.mini_fleet.fleet_id || "mini_fleet");
         wouldPreempt.push(current.mini_fleet.fleet_id || "mini_fleet");
+      }
+      if (profile.requires_both_boxes && !workerState.clear) {
+        blockedBy.push("gx10_not_clear");
       }
       const launchableNow = installedOn !== "missing" && blockedBy.length === 0;
       return {
@@ -650,6 +857,10 @@ export function createRuntime({
         adapter,
         call_target: callTarget,
         serving_port: lane.port || 8000,
+        requires_worker_clear: Boolean(profile.requires_both_boxes),
+        worker_clear_now: workerState.clear,
+        worker_blocking_containers: workerState.blocking_containers,
+        worker_responsive_ports: workerState.responsive_ports,
         health_endpoints: {
           health_url: `http://${config.hosts?.[lane.host_id || "spark"]?.public_host || "127.0.0.1"}:${lane.port || 8000}/health`,
           models_url: `http://${config.hosts?.[lane.host_id || "spark"]?.public_host || "127.0.0.1"}:${lane.port || 8000}/v1/models`,
@@ -658,7 +869,7 @@ export function createRuntime({
     });
     return {
       ok: true,
-      generated_at: isoNow(),
+      generated_at: currentIso(),
       controller: config.controller,
       hosts: config.hosts,
       lanes: config.lanes,
@@ -674,7 +885,7 @@ export function createRuntime({
     const config = await loadConfig();
     return {
       ok: true,
-      generated_at: isoNow(),
+      generated_at: currentIso(),
       controller: config.controller,
       source_of_truth: {
         static_models_json: path.join(repoRoot, "src", "config", "models.json"),
@@ -864,7 +1075,12 @@ export function createRuntime({
   async function stopLane(laneId, { preserveDesiredState = false } = {}) {
     const lane = String(laneId || "").trim().toLowerCase();
     if (lane === "large") {
-      const result = await runCommand(`bash ${shellQuote(path.join(repoRoot, "scripts", "stop_large_lane.sh"))}`, 300000);
+      const config = await loadConfig();
+      const largePort = String(config.lanes?.large?.port || 8000);
+      const result = await runCommandImpl(
+        `LLMCOMMUNE_LARGE_PORT=${shellQuote(largePort)} bash ${shellQuote(path.join(repoRoot, "scripts", "stop_large_lane.sh"))}`,
+        300000,
+      );
       if (!preserveDesiredState) {
         const desired = await loadDesiredState();
         desired.lane_targets.large = "";
@@ -881,7 +1097,12 @@ export function createRuntime({
       return result;
     }
     if (lane === "mini") {
-      const result = await runCommand(`bash ${shellQuote(path.join(repoRoot, "scripts", "stop_mini_lane.sh"))}`, 120000);
+      const config = await loadConfig();
+      const miniPort = String(config.lanes?.mini?.port || 7999);
+      const result = await runCommandImpl(
+        `LLMCOMMUNE_MINI_PORT=${shellQuote(miniPort)} bash ${shellQuote(path.join(repoRoot, "scripts", "stop_mini_lane.sh"))}`,
+        120000,
+      );
       if (!preserveDesiredState) {
         const desired = await loadDesiredState();
         desired.lane_targets.mini = "";
@@ -917,7 +1138,11 @@ export function createRuntime({
   }
 
   async function stopFleet({ preserveDesiredState = false } = {}) {
-    const result = await runCommand(`bash ${shellQuote(path.join(repoRoot, "scripts", "fleet_down.sh"))}`, 180000);
+    const config = await loadConfig();
+    const result = await runCommandImpl(
+      `LLMCOMMUNE_MINI_PORT=${shellQuote(String(config.lanes?.mini?.port || 7999))} LLMCOMMUNE_WORKER_MINI_PORT=${shellQuote(String(config.lanes?.mini?.port || 7999))} bash ${shellQuote(path.join(repoRoot, "scripts", "fleet_down.sh"))}`,
+      180000,
+    );
     if (!preserveDesiredState) {
       const desired = await loadDesiredState();
       desired.fleet_id = "";
@@ -938,33 +1163,33 @@ export function createRuntime({
   async function persistLaneState(laneId, profile) {
     const lane = String(laneId || "").trim().toLowerCase();
     const filePath = lane === "mini" ? localMiniSlotPath : localLargeSlotPath;
-    await writeJson(filePath, {
+    await writeJsonImpl(filePath, {
       lane_id: lane,
       profile_id: String(profile?.profile_id || ""),
       slot_label: String(profile?.profile_id || ""),
       model_id: String(profile?.model_id || ""),
       runtime_family: String(profile?.runtime_family || ""),
-      updated_at: isoNow(),
+      updated_at: currentIso(),
     });
   }
 
   async function waitForReady(port, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const probe = await probeRuntime(`http://127.0.0.1:${port}`);
+    const deadline = nowMs() + timeoutMs;
+    while (nowMs() < deadline) {
+      const probe = await probeRuntimeImpl(`http://127.0.0.1:${port}`);
       if (probe.up) return true;
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await sleepImpl(2000);
     }
     return false;
   }
 
   async function waitForFleet(config, targetUp, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+    const deadline = nowMs() + timeoutMs;
+    while (nowMs() < deadline) {
       const fleet = await resolveFleetState(config);
       if (targetUp && fleet.up) return true;
       if (!targetUp && fleet.members.every((member) => !member.up)) return true;
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      await sleepImpl(3000);
     }
     return false;
   }
@@ -974,8 +1199,8 @@ export function createRuntime({
     jobs.set(jobId, {
       ...current,
       ...patch,
-      updated_at: isoNow(),
-      elapsed_s: current.started_at_ms ? Number(((Date.now() - current.started_at_ms) / 1000).toFixed(1)) : 0,
+      updated_at: currentIso(),
+      elapsed_s: current.started_at_ms ? Number((((nowMs()) - current.started_at_ms) / 1000).toFixed(1)) : 0,
     });
   }
 
@@ -1002,6 +1227,7 @@ export function createRuntime({
       };
     }
     const current = await currentState();
+    const workerState = await workerClearState();
     const currentLane = current.lanes[selectedLane];
     if (currentLane?.profile_id === profile.profile_id && currentLane?.up) {
       await persistLaneState(selectedLane, profile);
@@ -1031,7 +1257,7 @@ export function createRuntime({
     }
     const currentOtherLane = selectedLane === "large" ? current.lanes?.mini : current.lanes?.large;
     const conflictingCurrent = [];
-    if (currentLane?.profile_id && currentLane.profile_id !== profile.profile_id) {
+    if (currentLane?.up && currentLane?.profile_id && currentLane.profile_id !== profile.profile_id) {
       conflictingCurrent.push(currentLane.profile_id);
     }
     if (currentOtherLane?.profile_id && currentOtherLane.up) {
@@ -1047,7 +1273,7 @@ export function createRuntime({
         detail: `requested activation would preempt ${conflictingCurrent.join(", ")}`,
       };
     }
-    const jobId = randomUUID();
+    const jobId = uuid();
     const adapter = adapterForProfile(config, profile);
     const job = {
       ok: true,
@@ -1061,8 +1287,8 @@ export function createRuntime({
       startup_expectation: profile.startup_expectation,
       current_phase: "queued",
       status: "queued",
-      started_at_ms: Date.now(),
-      updated_at: isoNow(),
+      started_at_ms: nowMs(),
+      updated_at: currentIso(),
     };
     jobs.set(jobId, job);
     const launch = async () => {
@@ -1089,9 +1315,28 @@ export function createRuntime({
             await stopLane("large", { preserveDesiredState: true });
           }
           await stopLane(selectedLane, { preserveDesiredState: true });
+          setJob(jobId, { current_phase: "stopping_conflicts", status_detail: "waiting for ports to settle" });
+          await sleepImpl(5000);
+        }
+        if (profile.requires_both_boxes) {
+          const postStopWorkerState = await workerClearState();
+          if (!postStopWorkerState.clear) {
+            const detail = `worker gx10-b041 is not clear for dual-box launch; containers=${postStopWorkerState.blocking_containers.join(",") || "none"} ports=${postStopWorkerState.responsive_ports.join(",") || "none"}`;
+            const failedDesired = await loadDesiredState();
+            await saveDesiredState({
+              ...failedDesired,
+              state: "failed",
+              watchdog_enforce: false,
+              status_detail: detail,
+            });
+            setJob(jobId, { status: "failed", current_phase: "failed", status_detail: detail });
+            return;
+          }
         }
         setJob(jobId, { current_phase: "starting_runtime" });
-        const result = await runCommand(profile.launch_command, (profile.startup_expectation?.ready_timeout_s || 900) * 1000);
+        const selectedLanePort = String(config.lanes?.[selectedLane]?.port || 8000);
+        const launchCommand = `PORT=${shellQuote(selectedLanePort)} ${profile.launch_command}`;
+        const result = await runCommandImpl(launchCommand, (profile.startup_expectation?.ready_timeout_s || 900) * 1000);
         if (!result.ok) {
           const failedDesired = await loadDesiredState();
           await saveDesiredState({
@@ -1177,7 +1422,7 @@ export function createRuntime({
     if (!fleet) {
       return { ok: false, detail: "no fleet configured" };
     }
-    const jobId = randomUUID();
+    const jobId = uuid();
     const job = {
       ok: true,
       accepted: true,
@@ -1190,8 +1435,8 @@ export function createRuntime({
       startup_expectation: fleet.startup_expectation || null,
       current_phase: "queued",
       status: "queued",
-      started_at_ms: Date.now(),
-      updated_at: isoNow(),
+      started_at_ms: nowMs(),
+      updated_at: currentIso(),
     };
     jobs.set(jobId, job);
     const launch = async () => {
@@ -1208,8 +1453,38 @@ export function createRuntime({
           status_detail: `starting fleet ${fleet.fleet_id || ""}`,
         });
         setJob(jobId, { status: "running", current_phase: "starting_runtime" });
-        const started = runDetachedCommand(`bash ${shellQuote(path.join(repoRoot, "scripts", "fleet_up.sh"))}`, repoRoot);
-        if (!started.ok) {
+        const miniPort = String(config.lanes?.mini?.port || 7999);
+        const largePort = String(config.lanes?.large?.port || 8000);
+        const fleetCommand = `PORT=${shellQuote(miniPort)} LLMCOMMUNE_LARGE_PORT=${shellQuote(largePort)} LLMCOMMUNE_MINI_PORT=${shellQuote(miniPort)} LLMCOMMUNE_WORKER_MINI_PORT=${shellQuote(miniPort)} bash ${shellQuote(path.join(repoRoot, "scripts", "fleet_up.sh"))}`;
+        let started = null;
+        if (wait) {
+          const result = await runCommandImpl(
+            fleetCommand,
+            (fleet.startup_expectation?.ready_timeout_s || 1200) * 1000,
+          );
+          if (!result.ok) {
+            await saveDesiredState({
+              mode: "fleet",
+              state: "failed",
+              watchdog_enforce: false,
+              lane_targets: {
+                large: "",
+                mini: "",
+              },
+              fleet_id: String(fleet.fleet_id || ""),
+              status_detail: result.error || result.stderr || "fleet up failed",
+            });
+            setJob(jobId, {
+              status: "failed",
+              current_phase: "failed",
+              status_detail: result.error || result.stderr || "fleet up failed",
+            });
+            return;
+          }
+        } else {
+          started = runDetachedCommandImpl(fleetCommand, repoRoot);
+        }
+        if (!wait && !started.ok) {
           await saveDesiredState({
             mode: "fleet",
             state: "failed",
@@ -1224,7 +1499,10 @@ export function createRuntime({
           setJob(jobId, { status: "failed", current_phase: "failed", status_detail: started.error || "fleet up failed" });
           return;
         }
-        setJob(jobId, { current_phase: "waiting_for_api", status_detail: `fleet launcher pid ${started.pid}` });
+        setJob(jobId, {
+          current_phase: "waiting_for_api",
+          status_detail: wait ? "fleet command completed; verifying readiness" : `fleet launcher pid ${started.pid}`,
+        });
         const ready = await waitForFleet(config, true, (fleet.startup_expectation?.ready_timeout_s || 1200) * 1000);
         if (!ready) {
           await saveDesiredState({
@@ -1277,7 +1555,7 @@ export function createRuntime({
   }
 
   async function fleetDown({ wait = false } = {}) {
-    const jobId = randomUUID();
+    const jobId = uuid();
     const job = {
       ok: true,
       accepted: true,
@@ -1290,8 +1568,8 @@ export function createRuntime({
       startup_expectation: null,
       current_phase: "queued",
       status: "queued",
-      started_at_ms: Date.now(),
-      updated_at: isoNow(),
+      started_at_ms: nowMs(),
+      updated_at: currentIso(),
     };
     jobs.set(jobId, job);
     const shutdown = async () => {
@@ -1309,8 +1587,35 @@ export function createRuntime({
           status_detail: "stopping fleet",
         });
         setJob(jobId, { status: "running", current_phase: "stopping_conflicts" });
-        const started = runDetachedCommand(`bash ${shellQuote(path.join(repoRoot, "scripts", "fleet_down.sh"))}`, repoRoot);
-        if (!started.ok) {
+        const miniPort = String((await loadConfig()).lanes?.mini?.port || 7999);
+        const fleetCommand = `PORT=${shellQuote(miniPort)} LLMCOMMUNE_MINI_PORT=${shellQuote(miniPort)} LLMCOMMUNE_WORKER_MINI_PORT=${shellQuote(miniPort)} bash ${shellQuote(path.join(repoRoot, "scripts", "fleet_down.sh"))}`;
+        let started = null;
+        if (wait) {
+          const result = await runCommandImpl(fleetCommand, 300000);
+          if (!result.ok) {
+            await saveDesiredState({
+              ...(await loadDesiredState()),
+              mode: "idle",
+              state: "failed",
+              watchdog_enforce: false,
+              lane_targets: {
+                large: "",
+                mini: "",
+              },
+              fleet_id: "",
+              status_detail: result.error || result.stderr || "fleet down failed",
+            });
+            setJob(jobId, {
+              status: "failed",
+              current_phase: "failed",
+              status_detail: result.error || result.stderr || "fleet down failed",
+            });
+            return;
+          }
+        } else {
+          started = runDetachedCommandImpl(fleetCommand, repoRoot);
+        }
+        if (!wait && !started.ok) {
           await saveDesiredState({
             ...(await loadDesiredState()),
             mode: "idle",
@@ -1326,7 +1631,10 @@ export function createRuntime({
           setJob(jobId, { status: "failed", current_phase: "failed", status_detail: started.error || "fleet down failed" });
           return;
         }
-        setJob(jobId, { current_phase: "stopping_conflicts", status_detail: `fleet-down launcher pid ${started.pid}` });
+        setJob(jobId, {
+          current_phase: "stopping_conflicts",
+          status_detail: wait ? "fleet down command completed; verifying shutdown" : `fleet-down launcher pid ${started.pid}`,
+        });
         const stopped = await waitForFleet(await loadConfig(), false, 180000);
         if (!stopped) {
           await saveDesiredState({
@@ -1372,12 +1680,12 @@ export function createRuntime({
 
   async function writeInventorySnapshot() {
     const payload = {
-      generated_at: isoNow(),
+      generated_at: currentIso(),
       current: await currentState(),
       models: await modelsState(),
     };
     const outputPath = path.join(repoRoot, "workspace", "current", "models.live.json");
-    await writeJson(outputPath, payload);
+    await writeJsonImpl(outputPath, payload);
     return payload;
   }
 

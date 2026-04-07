@@ -5,6 +5,10 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "watchdog": "node src/watchdog.js"
+    "watchdog": "node src/watchdog.js",
+    "test:unit": "node --test --test-concurrency=1 tests/unit/*.test.js",
+    "test:live": "node --test --test-concurrency=1 tests/live/*.test.js",
+    "test:report": "node scripts/test_report.js",
+    "test": "npm run test:unit && npm run test:live && npm run test:report"
   }
 }

@@ -9,6 +9,8 @@ CONTAINER_NAME="${CONTAINER_NAME:-llmcommune-worker-deepseek-7999}"
 SLOT_LABEL="${SLOT_LABEL:-gguf_deepseek_32b_worker_fleet}"
 MODEL_PATH="${MODEL_PATH:-/mnt/models/qwen/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M/files/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf}"
 CTX_SIZE="${CTX_SIZE:-32768}"
+STARTUP_RETRIES="${STARTUP_RETRIES:-3}"
+RETRY_BACKOFF_SECS="${RETRY_BACKOFF_SECS:-5}"
 STATE_PATH="$ROOT/workspace/runtime/worker_mini_slot.json"
 
 bash "$ROOT/scripts/stop_worker_mini_7999.sh" >/dev/null 2>&1 || true
@@ -28,22 +30,37 @@ while IFS= read -r stale_id; do
   [[ -n \"\$stale_id\" ]] || continue
   docker rm -f \"\$stale_id\" >/dev/null 2>&1 || true
 done < <(docker ps -a --filter \"publish=${PORT}\" --format \"{{.ID}}\")
-docker run -d \
-  --name \"$CONTAINER_NAME\" \
-  --label \"llmcommune.fleet=mini\" \
-  --label \"llmcommune.slot_owner=$SLOT_LABEL\" \
-  --gpus all \
-  -p \"${PORT}:${PORT}\" \
-  -v /mnt/models:/models \
-  --entrypoint /opt/llama/build/bin/llama-server \
-  container-deepseek32b-server-llama:latest \
-  --host 0.0.0.0 \
-  --port \"${PORT}\" \
-  --model \"\$CONTAINER_MODEL_PATH\" \
-  --ctx-size \"${CTX_SIZE}\" \
-  --parallel 1 \
-  --n-gpu-layers -1 \
-  --flash-attn on >/dev/null
+attempt=1
+while [[ \"\$attempt\" -le \"${STARTUP_RETRIES}\" ]]; do
+  if docker run -d \
+    --name \"$CONTAINER_NAME\" \
+    --label \"llmcommune.fleet=mini\" \
+    --label \"llmcommune.slot_owner=$SLOT_LABEL\" \
+    --gpus all \
+    -p \"${PORT}:${PORT}\" \
+    -v /mnt/models:/models \
+    --entrypoint /opt/llama/build/bin/llama-server \
+    container-deepseek32b-server-llama:latest \
+    --host 0.0.0.0 \
+    --port \"${PORT}\" \
+    --model \"\$CONTAINER_MODEL_PATH\" \
+    --ctx-size \"${CTX_SIZE}\" \
+    --parallel 1 \
+    --n-gpu-layers -1 \
+    --flash-attn on >/dev/null; then
+    break
+  fi
+  docker rm -f \"$CONTAINER_NAME\" >/dev/null 2>&1 || true
+  while IFS= read -r stale_id; do
+    [[ -n \"\$stale_id\" ]] || continue
+    docker rm -f \"\$stale_id\" >/dev/null 2>&1 || true
+  done < <(docker ps -a --filter \"publish=${PORT}\" --format \"{{.ID}}\")
+  if [[ \"\$attempt\" -ge \"${STARTUP_RETRIES}\" ]]; then
+    exit 1
+  fi
+  sleep \"${RETRY_BACKOFF_SECS}\"
+  attempt=$((attempt + 1))
+done
 '"
 
 python3 - "$STATE_PATH" "$PORT" "$SLOT_LABEL" "$MODEL_PATH" "$CONTAINER_NAME" <<'PY'

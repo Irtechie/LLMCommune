@@ -12,6 +12,7 @@ HOSTFILE_PATH="${HOSTFILE_PATH:-$HOME/openmpi-hostfile}"
 PORT="${PORT:-8000}"
 TRTLLM_HOST="${TRTLLM_HOST:-0.0.0.0}"
 STARTUP_RETRIES="${STARTUP_RETRIES:-2}"
+RETRY_BACKOFF_SECS="${RETRY_BACKOFF_SECS:-20}"
 DOCKER_PULL_TIMEOUT_SECS="${DOCKER_PULL_TIMEOUT_SECS:-600}"
 FORCE_DOCKER_PULL="${FORCE_DOCKER_PULL:-0}"
 CONTAINER_BOOT_TIMEOUT_SECS="${CONTAINER_BOOT_TIMEOUT_SECS:-180}"
@@ -717,6 +718,7 @@ while [[ "$attempt" -le "$STARTUP_RETRIES" ]]; do
   write_active_slot_metadata "starting" "$SLOT_LABEL" "startup attempt $attempt/$STARTUP_RETRIES" "$attempt"
   stop_container_here
   stop_container_remote
+  sleep 5
   LAST_PHASE="worker_container_start"
   log "starting worker container on $WORKER_SSH"
   if ! WORKER_CONTAINER_ID="$(start_container_remote)"; then
@@ -729,6 +731,7 @@ while [[ "$attempt" -le "$STARTUP_RETRIES" ]]; do
     if [[ "$attempt" -ge "$STARTUP_RETRIES" ]]; then
       exit 1
     fi
+    sleep "$RETRY_BACKOFF_SECS"
     attempt=$((attempt + 1))
     continue
   fi
@@ -748,6 +751,7 @@ while [[ "$attempt" -le "$STARTUP_RETRIES" ]]; do
     if [[ "$attempt" -ge "$STARTUP_RETRIES" ]]; then
       exit 1
     fi
+    sleep "$RETRY_BACKOFF_SECS"
     attempt=$((attempt + 1))
     continue
   fi
@@ -770,6 +774,7 @@ while [[ "$attempt" -le "$STARTUP_RETRIES" ]]; do
     if [[ "$attempt" -ge "$STARTUP_RETRIES" ]]; then
       exit 1
     fi
+    sleep "$RETRY_BACKOFF_SECS"
     attempt=$((attempt + 1))
     continue
   fi
@@ -789,6 +794,7 @@ while [[ "$attempt" -le "$STARTUP_RETRIES" ]]; do
     if [[ "$attempt" -ge "$STARTUP_RETRIES" ]]; then
       exit 1
     fi
+    sleep "$RETRY_BACKOFF_SECS"
     attempt=$((attempt + 1))
     continue
   fi
@@ -815,5 +821,6 @@ while [[ "$attempt" -le "$STARTUP_RETRIES" ]]; do
   if [[ "$attempt" -ge "$STARTUP_RETRIES" ]]; then
     exit 1
   fi
+  sleep "$RETRY_BACKOFF_SECS"
   attempt=$((attempt + 1))
 done

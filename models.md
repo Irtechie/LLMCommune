@@ -127,6 +127,7 @@ Apps should also read the controller's classification fields instead of inferrin
 
 Large lane:
 - `gguf_coder_next_large`
+- `gguf_gemma4_31b_large`
 - `gguf_qwen3_next_80b_large`
 - `trt_dual_gpt_oss_120b_large`
 - `trt_dual_llama33_70b_large`
@@ -186,6 +187,16 @@ Controller behavior:
   - official Qwen positioning: next-generation general foundation model focused on parameter efficiency, inference speed, ultra-long context, and agentic use
   - better fit than CoderNext when the task is broader reasoning, synthesis, long-context analysis, or general assistant work instead of coding-specialized throughput
   - main reasoning-oriented single-box large profile
+- `gguf_gemma4_31b_large`
+  - runtime: `llama.cpp`
+  - host pattern: single-box on `spark-f147`
+  - lane: `large`
+  - serves on: `spark:8000`
+  - official max context window: `262144` native
+  - current launcher context window: `262144`
+  - current local artifact: `ggml-org/gemma-4-31B-it-GGUF` `Q4_K_M` plus `mmproj-gemma-4-31B-it-f16.gguf`
+  - best fit when you want Gemma-class reasoning, `256K` context, and optional image understanding without consuming both boxes
+  - image input requires the multimodal projector sidecar; the commune launcher now passes it when present
 - `trt_single_qwen3_30b_a3b_mini`
   - runtime: `trtllm`
   - host pattern: single-box on `spark-f147`
@@ -215,6 +226,29 @@ Controller behavior:
   - official DeepSeek positioning: distilled reasoning model with strong math, code, and reasoning behavior inherited from DeepSeek-R1
   - mini helper/reserved lane for Alpha-style reasoning work
   - visible to other apps, but currently not the default CLI choice
+  - clean isolated rerun on 2026-04-04 averaged about `10.09 tok/s`; the older `~3.6 tok/s` reading was not representative
+
+Downloaded official fast/high-context mini candidates now present on both boxes:
+- `nvidia/Qwen3-8B-NVFP4`
+  - inventory status: downloaded on `spark-f147` and `gx10-b041`
+  - official max context window: `131K`
+  - likely role: fastest official TRT-style mini candidate to benchmark next
+- `nvidia/Qwen3-14B-NVFP4`
+  - inventory status: downloaded on `spark-f147` and `gx10-b041`
+  - official max context window: `131K`
+  - likely role: speed/quality middle ground between the 8B class and the current 30B/32B minis
+- `nvidia/Llama-3.1-8B-Instruct-NVFP4`
+  - inventory status: downloaded on `spark-f147` and `gx10-b041`
+  - official max context window: `128K`
+  - likely role: straightforward official 8B mini baseline
+- `nvidia/NVIDIA-Nemotron-Nano-9B-v2`
+  - inventory status: downloaded on `spark-f147` and `gx10-b041`
+  - official max context window: `128K`
+  - likely role: reasoning-heavy fast mini candidate; runtime path still needs local proof
+- `qwen/Qwen2.5-Coder-32B-Instruct-AWQ`
+  - inventory status: already present on both boxes
+  - official max context window: `131072`
+  - likely role: strongest already-downloaded same-size coding mini candidate once a real vLLM lane is added
 - `trt_dual_gpt_oss_120b_large`
   - runtime: `trtllm`
   - host pattern: dual-box on `spark-f147` + `gx10-b041`
@@ -241,10 +275,20 @@ Source notes:
   - https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct
 - DeepSeek-R1-Distill-Qwen-32B official card: distilled reasoning model with strong math/code/reasoning performance
   - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+- NVIDIA Qwen3-8B-NVFP4 official card
+  - https://huggingface.co/nvidia/Qwen3-8B-NVFP4
+- NVIDIA Qwen3-14B-NVFP4 official card
+  - https://huggingface.co/nvidia/Qwen3-14B-NVFP4
+- NVIDIA Llama-3.1-8B-Instruct-NVFP4 official card
+  - https://huggingface.co/nvidia/Llama-3.1-8B-Instruct-NVFP4
+- NVIDIA Nemotron Nano 9B v2 official card
+  - https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2
 - Qwen3-32B-NVFP4 evaluation card used for the mini TRT characterization
   - https://huggingface.co/RedHatAI/Qwen3-32B-NVFP4
 - NVIDIA Qwen3-30B-A3B-NVFP4 card used for the mini TRT general-use characterization
   - https://huggingface.co/nvidia/Qwen3-30B-A3B-NVFP4
+- Qwen2.5-Coder-32B-Instruct-AWQ official card
+  - https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
 
 ## Bonzai
 
@@ -266,7 +310,10 @@ Context note:
 - "current launcher context window" is what the current `LLMCommune` scripts are configured to serve today
 - for the single-box Qwen3 Next and Coder Next models, the official cards explicitly warn that `256K` may fail to start and recommend reducing to values like `32768` when memory is tight
 
-Unsafe / removed from active list:
+Strict dual-box-only large profiles:
 - `nvidia/Qwen3-235B-A22B-NVFP4`
-  - removed from the active `LLMCommune` large-lane profile list after a destabilizing dual-box TRT run
-  - keep as inventory only for now, not as a selectable CLI target
+  - only valid when both `spark-f147` and `gx10-b041` are reserved for the large lane
+  - `gx10/.204` must be clear before launch; `LLMCommune` now blocks activation if the worker still has managed mini or large runtime state
+- `openai/gpt-oss-120b`
+  - only valid when both `spark-f147` and `gx10-b041` are reserved for the large lane
+  - `gx10/.204` must be clear before launch; this path is not treated as a one-box fallback
