@@ -35,6 +35,7 @@ echo ""
 ensure_service llmcommune-controller.service "LLMCommune controller (:4000)"
 ensure_service alpha-synapse.service          "Alpha synapse         (:4001)"
 ensure_service alpha-gamenator-synapse.service "Alpha-Gamenator       (:4002)"
+ensure_service alpha-cortex-ui.service        "Alpha cortex-ui       (:8080)"
 
 echo ""
 echo "━━━ Service Status ━━━"
@@ -42,5 +43,6 @@ systemctl --user status llmcommune-controller.service alpha-synapse.service alph
   --no-pager -l --output=short-iso 2>&1 | grep -E 'Loaded|Active|Main|ago' | head -20
 
 echo ""
-echo "Dashboard: http://192.168.1.203:4000/dashboard"
+echo "Dashboard:  http://192.168.1.203:4000/dashboard"
+echo "Cortex UI:  http://192.168.1.203:8080"
 echo ""
