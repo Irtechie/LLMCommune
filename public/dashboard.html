@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLMCommune Dashboard</title>
+  <style>
+    :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3e; --text: #e2e8f0; --muted: #94a3b8; --green: #22c55e; --red: #ef4444; --yellow: #eab308; --blue: #3b82f6; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 0.25rem; }
+    .subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+    .card-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.5rem; }
+    .lane-status { font-size: 1rem; font-weight: 600; }
+    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; }
+    .badge-up { background: #16532d; color: var(--green); }
+    .badge-down { background: #450a0a; color: var(--red); }
+    .badge-idle { background: #1e2a3a; color: var(--muted); }
+    .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.5rem; }
+    button { padding: 0.45rem 1rem; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 500; transition: opacity 0.15s; }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    .btn-blue { background: var(--blue); color: #fff; }
+    .btn-yellow { background: #78350f; color: var(--yellow); }
+    .btn-red { background: #450a0a; color: var(--red); }
+    .btn-green { background: #16532d; color: var(--green); }
+    .log { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.72rem; background: #0a0c12; border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; max-height: 200px; overflow-y: auto; white-space: pre-wrap; color: var(--muted); }
+    .label { color: var(--muted); font-size: 0.8rem; }
+    .value { font-size: 0.9rem; }
+    .row { display: flex; justify-content: space-between; align-items: center; padding: 0.25rem 0; border-bottom: 1px solid var(--border); }
+    .row:last-child { border-bottom: none; }
+    #refresh-ts { color: var(--muted); font-size: 0.75rem; margin-left: auto; }
+    .section-title { font-size: 0.9rem; font-weight: 600; margin-bottom: 0.5rem; }
+    input[type=text] { background: #1a1d27; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 0.4rem 0.6rem; font-size: 0.85rem; width: 240px; }
+    select { background: #1a1d27; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 0.4rem 0.6rem; font-size: 0.85rem; }
+    .flex { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    .toast { position: fixed; bottom: 1.5rem; right: 1.5rem; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.85rem; max-width: 320px; z-index: 999; transition: opacity 0.3s; }
+  </style>
+</head>
+<body>
+  <h1>🏘 LLMCommune</h1>
+  <p class="subtitle">Dual-lane LLM host controller &nbsp;·&nbsp; <span id="controller-url">:4000</span> &nbsp;·&nbsp; <span id="refresh-ts">—</span></p>
+
+  <div class="grid" id="lane-cards">
+    <div class="card" id="card-large">
+      <div class="card-title">Large Lane · :8000</div>
+      <div class="lane-status">Loading…</div>
+    </div>
+    <div class="card" id="card-mini">
+      <div class="card-title">Mini Lane · :7999</div>
+      <div class="lane-status">Loading…</div>
+    </div>
+    <div class="card" id="card-fleet">
+      <div class="card-title">Mini Fleet</div>
+      <div class="lane-status">Loading…</div>
+    </div>
+    <div class="card" id="card-desired">
+      <div class="card-title">Desired State</div>
+      <div id="desired-content">Loading…</div>
+    </div>
+    <div class="card" id="card-alpha">
+      <div class="card-title">Alpha · :4001</div>
+      <div class="lane-status">Loading…</div>
+    </div>
+    <div class="card" id="card-alpha-gamenator">
+      <div class="card-title">Alpha-Gamenator · :4002</div>
+      <div class="lane-status">Loading…</div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <div class="section-title" style="width:100%">Quick Actions</div>
+    <button class="btn-yellow" onclick="post('/bonzai')">⚡ Bonzai</button>
+    <button class="btn-green" onclick="post('/fleet/up')">Fleet Up</button>
+    <button class="btn-red" onclick="post('/fleet/down')">Fleet Down</button>
+    <button class="btn-red" onclick="stopLane('all')">Stop All</button>
+    <button class="btn-red" onclick="stopLane('large')">Stop Large</button>
+    <button class="btn-red" onclick="stopLane('mini')">Stop Mini</button>
+    <button class="btn-blue" onclick="refreshAll()">🔄 Refresh</button>
+  </div>
+
+  <div class="card" style="margin-bottom:1rem">
+    <div class="card-title">Activate Profile</div>
+    <div class="flex" style="margin-top:0.5rem">
+      <select id="profile-select"><option value="">Select profile…</option></select>
+      <select id="lane-select">
+        <option value="">auto</option>
+        <option value="large">large</option>
+        <option value="mini">mini</option>
+      </select>
+      <button class="btn-blue" onclick="activateSelected()">Activate</button>
+      <button class="btn-yellow" onclick="dryRunSelected()">Dry Run</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Event Log</div>
+    <div id="event-log" class="log">Waiting for events…</div>
+  </div>
+
+  <div id="toast" class="toast" style="display:none"></div>
+
+  <script>
+    const BASE = '';
+    let allProfiles = [];
+
+    function toast(msg, isError) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.style.display = 'block';
+      el.style.borderColor = isError ? 'var(--red)' : 'var(--green)';
+      clearTimeout(el._t);
+      el._t = setTimeout(() => { el.style.display = 'none'; }, 4000);
+    }
+
+    function log(msg) {
+      const el = document.getElementById('event-log');
+      el.textContent += new Date().toLocaleTimeString() + ' ' + msg + '\n';
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function badge(up) {
+      return up ? '<span class="badge badge-up">UP</span>' : '<span class="badge badge-down">DOWN</span>';
+    }
+
+    async function get(path) {
+      const r = await fetch(BASE + path);
+      return r.json();
+    }
+
+    async function post(path, body = {}) {
+      log('→ POST ' + path);
+      const r = await fetch(BASE + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!data.ok && !data.accepted) {
+        toast('Error: ' + (data.detail || JSON.stringify(data)), true);
+        log('✗ ' + path + ' failed: ' + (data.detail || ''));
+      } else {
+        toast('OK: ' + path, false);
+        log('✓ ' + path + (data.job_id ? ' job=' + data.job_id : ''));
+      }
+      setTimeout(refreshAll, 2000);
+      return data;
+    }
+
+    async function stopLane(laneId) {
+      return post('/api/llm-host/actions/stop', { lane_id: laneId });
+    }
+
+    async function activateSelected() {
+      const profileId = document.getElementById('profile-select').value;
+      const laneId = document.getElementById('lane-select').value;
+      if (!profileId) { toast('Select a profile first', true); return; }
+      return post('/api/llm-host/activate', { profile_id: profileId, lane_id: laneId || undefined });
+    }
+
+    async function dryRunSelected() {
+      const profileId = document.getElementById('profile-select').value;
+      const laneId = document.getElementById('lane-select').value;
+      if (!profileId) { toast('Select a profile first', true); return; }
+      const data = await post('/api/llm-host/activate', { profile_id: profileId, lane_id: laneId || undefined, dry_run: true });
+      if (data.plan) log('DRY RUN plan: ' + JSON.stringify(data.plan, null, 2));
+    }
+
+    function renderLane(cardId, label, port, lane) {
+      const card = document.getElementById(cardId);
+      card.innerHTML = `
+        <div class="card-title">${label} · :${port}</div>
+        <div class="lane-status">${badge(lane.up)} ${lane.profile_id || '<span style="color:var(--muted)">idle</span>'}</div>
+        ${lane.model_id ? `<div class="label" style="margin-top:0.3rem">${lane.model_id}</div>` : ''}
+        ${lane.runtime_family ? `<div class="label">runtime: ${lane.runtime_family}</div>` : ''}
+      `;
+    }
+
+    async function refreshAll() {
+      try {
+        const data = await get('/api/llm-host/current');
+        document.getElementById('refresh-ts').textContent = new Date().toLocaleTimeString();
+        if (data.controller?.base_url) document.getElementById('controller-url').textContent = data.controller.base_url;
+
+        renderLane('card-large', 'Large Lane', 8000, data.lanes?.large || {});
+        renderLane('card-mini', 'Mini Lane', 7999, data.lanes?.mini || {});
+
+        const fleet = data.mini_fleet || {};
+        document.getElementById('card-fleet').innerHTML = `
+          <div class="card-title">Mini Fleet</div>
+          <div class="lane-status">${badge(fleet.up)} ${fleet.fleet_id || '<span style="color:var(--muted)">none</span>'}</div>
+          ${(fleet.members || []).map(m => `<div class="label">${m.member_id}: ${m.up ? '✓' : '✗'} ${m.model_id || ''}</div>`).join('')}
+        `;
+
+        const ds = data.desired_state || {};
+        document.getElementById('desired-content').innerHTML = `
+          <div class="row"><span class="label">mode</span><span class="value">${ds.mode || '—'}</span></div>
+          <div class="row"><span class="label">state</span><span class="value">${ds.state || '—'}</span></div>
+          <div class="row"><span class="label">watchdog</span><span class="value">${ds.watchdog_enforce ? '🟢 enforcing' : '⚪ idle'}</span></div>
+          <div class="row"><span class="label">large target</span><span class="value">${ds.lane_targets?.large || '—'}</span></div>
+          <div class="row"><span class="label">mini target</span><span class="value">${ds.lane_targets?.mini || '—'}</span></div>
+          ${ds.status_detail ? `<div class="label" style="margin-top:0.4rem">${ds.status_detail}</div>` : ''}
+        `;
+      } catch (err) {
+        log('refresh error: ' + err.message);
+      }
+
+      // Populate profile selector
+      try {
+        const mdata = await get('/api/llm-host/models');
+        allProfiles = mdata.profiles || [];
+        const sel = document.getElementById('profile-select');
+        const prev = sel.value;
+        sel.innerHTML = '<option value="">Select profile…</option>' +
+          allProfiles.map(p => `<option value="${p.profile_id}" ${p.profile_id === prev ? 'selected' : ''}>${p.display_name || p.profile_id} (${p.size_class || '?'})</option>`).join('');
+      } catch {}
+
+      // Sister services: Alpha and Alpha-Gamenator
+      await Promise.allSettled([
+        refreshSister('card-alpha', '/api/services/alpha/health', 'Alpha · :4001'),
+        refreshSister('card-alpha-gamenator', '/api/services/alpha-gamenator/health', 'Alpha-Gamenator · :4002'),
+      ]);
+    }
+
+    async function refreshSister(cardId, path, label) {
+      const card = document.getElementById(cardId);
+      try {
+        const data = await get(path);
+        const up = data.ok === true;
+        const extra = data.uptime != null ? `<div class="label">uptime: ${Math.round(data.uptime)}s</div>` : '';
+        const projects = data.projects != null ? `<div class="label">projects: ${data.projects}</div>` : '';
+        card.innerHTML = `
+          <div class="card-title">${label}</div>
+          <div class="lane-status">${badge(up)} <span style="color:var(--muted);font-size:0.85rem">${data.service || 'synapse'}</span></div>
+          ${extra}${projects}
+        `;
+      } catch {
+        card.innerHTML = `
+          <div class="card-title">${label}</div>
+          <div class="lane-status">${badge(false)} <span style="color:var(--muted);font-size:0.85rem">offline</span></div>
+        `;
+      }
+    }
+
+    refreshAll();
+    setInterval(refreshAll, 10000);
+  </script>
+</body>
+</html>
