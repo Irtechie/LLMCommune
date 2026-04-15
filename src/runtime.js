@@ -1,8 +1,11 @@
+// @ts-check
 import { exec as execCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename, copyFile, appendFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { logger } from "./logger.js";
+import { ErrorCode, apiError } from "./errors.js";
 
 const exec = promisify(execCallback);
 
@@ -54,9 +57,19 @@ async function readJson(filePath, fallback) {
   }
 }
 
+/** Write JSON atomically: write to .tmp, then rename into place. */
 async function writeJson(filePath, payload) {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
+  const tmpPath = `${filePath}.tmp`;
+  const dir = path.dirname(filePath);
+  await mkdir(dir, { recursive: true });
+  await writeFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
+  await rename(tmpPath, filePath);
+}
+
+/** Append a completed job to the JSONL history file. */
+async function appendJobHistory(historyPath, job) {
+  await mkdir(path.dirname(historyPath), { recursive: true });
+  await appendFile(historyPath, JSON.stringify(job) + "\n", "utf-8");
 }
 
 async function runCommand(command, timeoutMs = 600000) {
@@ -149,7 +162,7 @@ function isoNow() {
 export function createRuntime({
   repoRoot,
   workerSsh = "admin@192.168.1.204",
-  workerSshOptions = "-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /home/admin/.ssh/trtllm_ed25519",
+  workerSshOptions = "-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -i /home/admin/.ssh/trtllm_ed25519",
   dependencies = {},
   paths = {},
 } = {}) {
@@ -169,9 +182,57 @@ export function createRuntime({
   const localMiniSlotPath = paths.localMiniSlotPath || path.join(stateRoot, "mini_slot.json");
   const desiredStatePath = paths.desiredStatePath || path.join(stateRoot, "desired_state.json");
   const activeManagedSlotPath = paths.activeManagedSlotPath || path.join(jobsStateRoot, "active_slot.json");
+  const jobHistoryPath = paths.jobHistoryPath || path.join(stateRoot, "job_history.jsonl");
+  const auditLogPath = paths.auditLogPath || path.join(stateRoot, "activation_audit.jsonl");
+  const webhookUrl = process.env.LLMCOMMUNE_WEBHOOK_URL || "";
+  const jobTtlMs = Number(process.env.LLMCOMMUNE_JOB_TTL_MS || 3600000);
   const jobs = new Map();
   let cache = { ts: 0, value: null };
   const currentIso = () => new Date(nowMs()).toISOString();
+
+  // Per-lane activation mutex — prevents two concurrent activations on the same lane.
+  const laneLocks = new Map();
+
+  // Set-level activation guard — one activate-set at a time.
+  let _activating = false;
+  let _activatingSetId = "";
+  let _activatingStartMs = 0;
+
+  /** @param {string} laneId @param {() => Promise<unknown>} fn */
+  async function withLaneLock(laneId, fn) {
+    const prev = laneLocks.get(laneId) || Promise.resolve();
+    let releaseLock;
+    const next = new Promise((resolve) => { releaseLock = resolve; });
+    laneLocks.set(laneId, prev.then(() => next));
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      releaseLock?.();
+    }
+  }
+
+  // Prometheus-style counters (in-memory, exported via /metrics).
+  const metrics = {
+    activations_total: 0,
+    activations_failed: 0,
+    activations_ready: 0,
+    activation_duration_ms: [],
+    probe_failures_total: 0,
+  };
+
+  // Job GC: expire completed/failed jobs older than jobTtlMs.
+  if (!dependencies.disableJobGc) {
+    const gcInterval = setInterval(() => {
+      const cutoff = nowMs() - jobTtlMs;
+      for (const [jobId, job] of jobs) {
+        if (["ready", "failed"].includes(String(job?.status || "")) && Number(job?.started_at_ms || 0) < cutoff) {
+          jobs.delete(jobId);
+        }
+      }
+    }, Math.max(60000, jobTtlMs / 4));
+    if (gcInterval.unref) gcInterval.unref();
+  }
 
   function defaultDesiredState() {
     return {
@@ -190,6 +251,49 @@ export function createRuntime({
 
   async function loadConfig() {
     return readJsonImpl(configPath, {});
+  }
+
+  /** Validate essential config fields. Throws with a clear message on failure. */
+  function validateConfig(config) {
+    const required = ["controller", "hosts", "lanes", "profiles"];
+    const missing = required.filter((key) => !config[key]);
+    if (missing.length > 0) {
+      throw new Error(`Config validation failed — missing required fields: ${missing.join(", ")}. Check ${configPath}`);
+    }
+    if (!Array.isArray(config.profiles) || config.profiles.length === 0) {
+      throw new Error("Config validation failed — profiles must be a non-empty array.");
+    }
+    if (!config.lanes?.large || !config.lanes?.mini) {
+      throw new Error("Config validation failed — config.lanes must define both 'large' and 'mini'.");
+    }
+    if (config.controller?.activation_sets && !Array.isArray(config.controller.activation_sets)) {
+      throw new Error("Config validation failed — controller.activation_sets must be an array when present.");
+    }
+  }
+
+  let _validatedConfig = null;
+  /** Load and validate config, caching the validated result. */
+  async function loadValidatedConfig() {
+    if (_validatedConfig) return _validatedConfig;
+    const config = await loadConfig();
+    validateConfig(config);
+    _validatedConfig = config;
+    return config;
+  }
+
+  /** Call once at startup to eagerly validate config and log a warning for missing model paths. */
+  async function startupChecks() {
+    const config = await loadValidatedConfig();
+    // Startup model-path existence checks.
+    for (const profile of (config.profiles || [])) {
+      const sparkPath = profile?.model_paths?.spark || "";
+      if (sparkPath) {
+        const result = await runCommandImpl(`[ -e ${shellQuote(sparkPath)} ]`, 15000);
+        if (!result.ok) {
+          logger.warn("startup: model path missing for profile", { profile_id: profile.profile_id, path: sparkPath });
+        }
+      }
+    }
   }
 
   async function loadDesiredState() {
@@ -214,7 +318,13 @@ export function createRuntime({
       },
       updated_at: currentIso(),
     };
+    // Backup previous state before overwriting.
+    try {
+      await copyFile(desiredStatePath, `${desiredStatePath}.bak`).catch(() => {});
+    } catch { /* no existing file yet — skip */ }
     await writeJsonImpl(desiredStatePath, payload);
+    // Invalidate inventory cache so /models reflects the new state immediately.
+    cache = { ts: 0, value: null };
     return payload;
   }
 
@@ -251,14 +361,17 @@ export function createRuntime({
       });
   }
 
-  async function workerPortResponsive(port) {
-    const host = "192.168.1.204";
-    const probe = await probeRuntimeImpl(`http://${host}:${Number(port)}`);
+  async function workerPortResponsive(port, config) {
+    const workerHost = config?.hosts?.gx10?.public_host || workerSsh.split("@")[1] || "192.168.1.204";
+    const probe = await probeRuntimeImpl(`http://${workerHost}:${Number(port)}`);
+    if (!probe.up) metrics.probe_failures_total++;
     return Boolean(probe.up);
   }
 
-  async function workerClearState() {
+  async function workerClearState(config) {
     const remoteContainers = await listContainers(true);
+    // Managed container names — pulled from config when available, with hardcoded fallback.
+    const configManagedNames = Array.isArray(config?.managed_container_names) ? config.managed_container_names : [];
     const managedNames = new Set([
       "trtllm-multinode",
       "llm-shared",
@@ -268,6 +381,7 @@ export function createRuntime({
       "coder-deepseek-7999",
       "llm-mini-7999",
       "llm-trt-mini-7999",
+      ...configManagedNames,
     ]);
     const blockingContainers = remoteContainers
       .filter((entry) => managedNames.has(String(entry.name || "")))
@@ -275,7 +389,7 @@ export function createRuntime({
       .filter(Boolean);
     const responsivePorts = [];
     for (const port of [7999, 8000]) {
-      if (await workerPortResponsive(port)) {
+      if (await workerPortResponsive(port, config)) {
         responsivePorts.push(port);
       }
     }
@@ -473,6 +587,11 @@ export function createRuntime({
     return (config.profiles || []).find((entry) => String(entry?.profile_id || "") === String(profileId || ""));
   }
 
+  function activationSetById(config, setId) {
+    return (config.controller?.activation_sets || [])
+      .find((entry) => String(entry?.set_id || "") === String(setId || ""));
+  }
+
   function profilePolicy(config, profileId) {
     return config.profile_policy?.[String(profileId || "")] || {};
   }
@@ -550,13 +669,16 @@ export function createRuntime({
       const fleet = (config.fleet_profiles || []).find((entry) => String(entry?.fleet_id || "") === String(desired.fleet_id || ""));
       return Number(fleet?.startup_expectation?.ready_timeout_s || 1200) * 1000;
     }
-    const targets = [desired?.lane_targets?.large, desired?.lane_targets?.mini]
+    const targetProfiles = [desired?.lane_targets?.large, desired?.lane_targets?.mini]
       .map((value) => String(value || "").trim())
-      .filter(Boolean);
-    const targetProfile = targets
+      .filter(Boolean)
       .map((profileId) => profileById(config, profileId))
-      .find(Boolean);
-    return Number(targetProfile?.startup_expectation?.ready_timeout_s || 900) * 1000;
+      .filter(Boolean);
+    const readyTimeoutMs = targetProfiles.reduce((maxTimeoutMs, profile) => {
+      const timeoutMs = Number(profile?.startup_expectation?.ready_timeout_s || 900) * 1000;
+      return Math.max(maxTimeoutMs, timeoutMs);
+    }, 0);
+    return readyTimeoutMs || 900000;
   }
 
   function normalizeDesiredState(config, desiredState, snapshot) {
@@ -597,11 +719,17 @@ export function createRuntime({
     };
 
     if (String(desired.mode || "") === "lane") {
+      const wantsLaneTargets = Boolean(largeTarget || miniTarget);
+      const largeMatches = !largeTarget || (largeUp && String(snapshot?.large?.profile_id || "") === largeTarget);
+      const miniMatches = !miniTarget || (miniUp && String(snapshot?.mini?.profile_id || "") === miniTarget);
+      const unexpectedLarge = !largeTarget && largeUp;
+      const unexpectedMini = !miniTarget && miniUp;
       if (
-        largeTarget &&
-        largeUp &&
-        String(snapshot?.large?.profile_id || "") === largeTarget &&
-        !miniUp &&
+        wantsLaneTargets &&
+        largeMatches &&
+        miniMatches &&
+        !unexpectedLarge &&
+        !unexpectedMini &&
         !fleetUp &&
         (
           String(desired.state || "") !== "ready" ||
@@ -610,30 +738,55 @@ export function createRuntime({
           String(desired.fleet_id || "") !== ""
         )
       ) {
+        const statusDetail = largeTarget && miniTarget
+          ? `${largeTarget} ready on large + ${miniTarget} ready on mini`
+          : largeTarget
+            ? `${largeTarget} ready on large`
+            : `${miniTarget} ready on mini`;
         apply({
           state: "ready",
           watchdog_enforce: true,
           fleet_id: "",
-          status_detail: `${largeTarget} ready on large`,
+          status_detail: statusDetail,
         });
-      } else if (
-        miniTarget &&
-        miniUp &&
-        String(snapshot?.mini?.profile_id || "") === miniTarget &&
-        !largeUp &&
-        !fleetUp &&
-        (
-          String(desired.state || "") !== "ready" ||
-          !desired.watchdog_enforce ||
-          String(desired.mode || "") !== "lane" ||
-          String(desired.fleet_id || "") !== ""
-        )
-      ) {
+      }
+    }
+
+    // Reality correction: when a lane IS up but serving a different profile than
+    // desired_state records, correct lane_targets + active_set_id to truth before
+    // returning — so no stale data ever leaves the controller.
+    if (!changed && String(desired.mode || "") === "lane") {
+      const largeActual = largeUp ? String(snapshot?.large?.profile_id || "") : "";
+      const miniActual  = miniUp  ? String(snapshot?.mini?.profile_id  || "") : "";
+      // Diverged: running profile differs from desired target (only when identifiable)
+      const largeDiverged = largeUp && largeActual && largeActual !== largeTarget;
+      const miniDiverged  = (miniUp && miniActual && miniActual !== miniTarget) ||
+                            (!miniTarget && miniUp && miniActual); // unexpected mini
+      if (largeDiverged || miniDiverged) {
+        const correctedLarge = (largeUp && largeActual) ? largeActual : largeTarget;
+        const correctedMini  = (miniUp  && miniActual)  ? miniActual  : miniTarget;
+        // Find a known set that matches the corrected reality
+        const matchingSet = (config.controller?.activation_sets || []).find((s) => {
+          const sl = String(s.lane_targets?.large || "");
+          const sm = String(s.lane_targets?.mini  || "");
+          return sl === correctedLarge && sm === correctedMini;
+        });
+        const parts = [
+          correctedLarge && `${correctedLarge} on large`,
+          correctedMini  && `${correctedMini} on mini`,
+        ].filter(Boolean);
+        logger.warn("desired_state diverged from reality — correcting", {
+          desired_large: largeTarget,    actual_large: largeActual,
+          desired_mini:  miniTarget,     actual_mini:  miniActual,
+          corrected_set_id: matchingSet?.set_id ?? null,
+        });
         apply({
           state: "ready",
           watchdog_enforce: true,
           fleet_id: "",
-          status_detail: `${miniTarget} ready on mini`,
+          active_set_id: matchingSet?.set_id ?? null,
+          lane_targets: { large: correctedLarge, mini: correctedMini },
+          status_detail: `corrected from reality: ${parts.join(" + ")}`,
         });
       }
     }
@@ -731,7 +884,7 @@ export function createRuntime({
   }
 
   async function currentState() {
-    const config = await loadConfig();
+    const config = await loadValidatedConfig();
     const largeLane = await resolveLargeLaneCurrent(config);
     const miniLane = await resolveMiniLaneCurrent(config);
     const fleet = await resolveFleetState(config);
@@ -809,10 +962,10 @@ export function createRuntime({
   }
 
   async function modelsState() {
-    const config = await loadConfig();
+    const config = await loadValidatedConfig();
     const inventory = await collectInventory(config);
     const current = await currentState();
-    const workerState = await workerClearState();
+    const workerState = await workerClearState(config);
     const currentLarge = current.lanes.large;
     const currentMini = current.lanes.mini;
     const profiles = (config.profiles || []).map((rawProfile) => {
@@ -882,7 +1035,17 @@ export function createRuntime({
   }
 
   async function helpState() {
-    const config = await loadConfig();
+    const config = await loadValidatedConfig();
+    const sparkHost = config.hosts?.spark?.public_host || "192.168.1.203";
+    const activationSets = (config.controller?.activation_sets || []).map((entry) => ({
+      set_id: String(entry?.set_id || ""),
+      display_name: String(entry?.display_name || ""),
+      description: String(entry?.description || ""),
+      lane_targets: {
+        large: String(entry?.lane_targets?.large || ""),
+        mini: String(entry?.lane_targets?.mini || ""),
+      },
+    }));
     return {
       ok: true,
       generated_at: currentIso(),
@@ -922,7 +1085,7 @@ export function createRuntime({
         ],
       },
       lane_policy: {
-        summary: "Mode is exclusive: either one large profile on spark:8000, or mini-only mode on :7999 / fleet. The mini lane is :7999 on spark for one mini profile. Fleet mode may instead use spark:7999 plus gx10:7999 for one mini per box. Starting any large profile clears mini and fleet state first. Starting a mini profile clears the large lane first.",
+        summary: "Normal lane mode supports one large profile on spark:8000 plus one mini profile on spark:7999 at the same time. Generic /activate preserves the current exclusive-swap behavior unless a coordinated activation set is used. Fleet mode is separate and may instead use spark:7999 plus gx10:7999 for one mini per box.",
         large_lane: config.lanes?.large,
         mini_lane: config.lanes?.mini,
       },
@@ -945,8 +1108,21 @@ export function createRuntime({
             profile_id: "required",
             lane_id: "optional; defaults to the profile's default lane",
             wait: "optional boolean",
-            allow_preempt: "optional boolean, default true"
+            allow_preempt: "optional boolean, default true",
+            dry_run: "optional boolean — returns the activation plan without executing",
+            override: "optional boolean — required to activate a manual_only_restore profile",
           }
+        },
+        activate_set: {
+          method: "POST",
+          path: "/api/llm-host/activate-set",
+          body: {
+            set_id: "required",
+            wait: "optional boolean",
+            allow_preempt: "optional boolean, default true",
+            dry_run: "optional boolean — returns the coordinated activation plan without executing",
+          },
+          activation_sets: activationSets,
         },
         restart: {
           method: "POST",
@@ -982,11 +1158,11 @@ export function createRuntime({
         }
       },
       runtime_adapters: {
-        trtllm: buildAdapter("trtllm", "http://192.168.1.203:8000", "OpenAI-compatible TensorRT-LLM lane."),
-        "llama.cpp": buildAdapter("llama.cpp", "http://192.168.1.203:7999", "OpenAI-compatible llama.cpp lane."),
-        vllm: buildAdapter("vllm", "http://192.168.1.203:8000", "OpenAI-compatible vLLM lane."),
-        litellm: buildAdapter("litellm", "http://192.168.1.203:8000", "OpenAI-compatible LiteLLM proxy lane."),
-        ollama: buildAdapter("ollama", "http://192.168.1.203:11434", "Ollama-native lane."),
+        trtllm: buildAdapter("trtllm", `http://${sparkHost}:8000`, "OpenAI-compatible TensorRT-LLM lane."),
+        "llama.cpp": buildAdapter("llama.cpp", `http://${sparkHost}:7999`, "OpenAI-compatible llama.cpp lane."),
+        vllm: buildAdapter("vllm", `http://${sparkHost}:8000`, "OpenAI-compatible vLLM lane."),
+        litellm: buildAdapter("litellm", `http://${sparkHost}:8000`, "OpenAI-compatible LiteLLM proxy lane."),
+        ollama: buildAdapter("ollama", `http://${sparkHost}:11434`, "Ollama-native lane."),
       },
       troubleshooting: {
         reports: {
@@ -994,8 +1170,8 @@ export function createRuntime({
           models_md: path.join(repoRoot, "models.md"),
         },
         lane_stop_rules: {
-          large: "Starting a large profile stops the mini lane and fleet first, then replaces the large lane, so the large model gets maximum context headroom on spark.",
-          mini: "Starting a mini profile stops the large lane first and then replaces only the mini lane. Mixed large+mini mode is intentionally disabled.",
+          large: "Generic large-lane activation stops fleet first and then replaces the large lane. By default it also clears the mini lane unless a coordinated activation set preserves it.",
+          mini: "Generic mini-lane activation stops fleet first and then replaces only the mini lane. By default it also clears the large lane unless a coordinated activation set preserves it.",
           fleet: "Fleet mode runs one mini per box: spark:7999 for Qwen and gx10:7999 for DeepSeek. Starting a large profile tears the fleet down first.",
           all: "Use lane_id=all only for deliberate full teardown.",
         },
@@ -1008,8 +1184,8 @@ export function createRuntime({
             ],
             logs_root: path.join(repoRoot, "workspace", "jobs", "_lanes"),
             direct_checks: [
-              "curl http://192.168.1.203:8000/v1/models",
-              "curl http://192.168.1.203:7999/v1/models",
+              `curl http://${sparkHost}:8000/v1/models`,
+              `curl http://${sparkHost}:7999/v1/models`,
             ],
             stop_commands: [
               "bash /home/admin/apps/LLMCommune/scripts/stop_large_lane.sh",
@@ -1064,8 +1240,9 @@ export function createRuntime({
         "If the requested profile is already up on its lane, activate returns ready immediately without restarting it.",
         "Large dual-box profiles reserve both GX10 boxes but still serve through spark on :8000.",
         "The mini lane is reserved for <=32B profiles only and is the normal single-mini target.",
-        "Mode is exclusive: one large profile on :8000, or mini-only mode on :7999 / fleet.",
-        "Starting a large profile clears mini and fleet state first so the large model has the most context headroom possible on spark.",
+        "Lane mode can carry one large target plus one mini target simultaneously when desired_state tracks both lanes.",
+        "Generic /activate keeps the existing exclusive swap semantics so existing callers are not surprised.",
+        "Use /api/llm-host/activate-set for named combinations such as Gamenator lane pairings.",
         "Fleet mode is separate from the primary mini lane and is intended for one mini per box, not multiple 32B models on the same box.",
         "Use the live JSON endpoints over docs when there is any mismatch.",
       ],
@@ -1075,7 +1252,7 @@ export function createRuntime({
   async function stopLane(laneId, { preserveDesiredState = false } = {}) {
     const lane = String(laneId || "").trim().toLowerCase();
     if (lane === "large") {
-      const config = await loadConfig();
+      const config = await loadValidatedConfig();
       const largePort = String(config.lanes?.large?.port || 8000);
       const result = await runCommandImpl(
         `LLMCOMMUNE_LARGE_PORT=${shellQuote(largePort)} bash ${shellQuote(path.join(repoRoot, "scripts", "stop_large_lane.sh"))}`,
@@ -1097,7 +1274,7 @@ export function createRuntime({
       return result;
     }
     if (lane === "mini") {
-      const config = await loadConfig();
+      const config = await loadValidatedConfig();
       const miniPort = String(config.lanes?.mini?.port || 7999);
       const result = await runCommandImpl(
         `LLMCOMMUNE_MINI_PORT=${shellQuote(miniPort)} bash ${shellQuote(path.join(repoRoot, "scripts", "stop_mini_lane.sh"))}`,
@@ -1138,7 +1315,7 @@ export function createRuntime({
   }
 
   async function stopFleet({ preserveDesiredState = false } = {}) {
-    const config = await loadConfig();
+    const config = await loadValidatedConfig();
     const result = await runCommandImpl(
       `LLMCOMMUNE_MINI_PORT=${shellQuote(String(config.lanes?.mini?.port || 7999))} LLMCOMMUNE_WORKER_MINI_PORT=${shellQuote(String(config.lanes?.mini?.port || 7999))} bash ${shellQuote(path.join(repoRoot, "scripts", "fleet_down.sh"))}`,
       180000,
@@ -1212,22 +1389,56 @@ export function createRuntime({
     return String(laneId || "").trim().toLowerCase() === "mini" && String(profile?.size_class || "") === "mini";
   }
 
-  async function activate({ profileId, laneId = "", wait = false, allowPreempt = true } = {}) {
-    const config = await loadConfig();
+  function laneTargetsForActivation({ selectedLane, profile, preserveOtherLane = false, otherLaneTarget = "" }) {
+    const currentTarget = String(profile?.profile_id || "").trim();
+    const preservedTarget = preserveOtherLane ? String(otherLaneTarget || "").trim() : "";
+    return {
+      large: selectedLane === "large" ? currentTarget : preservedTarget,
+      mini: selectedLane === "mini" ? currentTarget : preservedTarget,
+    };
+  }
+
+  async function activate({
+    profileId,
+    laneId = "",
+    wait = false,
+    allowPreempt = true,
+    dryRun = false,
+    override = false,
+    preserveOtherLane = false,
+    otherLaneTarget = "",
+  } = {}) {
+    const config = await loadValidatedConfig();
     const profile = profileById(config, profileId);
     if (!profile) {
-      return { ok: false, accepted: false, detail: `unknown profile_id ${profileId}` };
+      return { ...apiError(ErrorCode.PROFILE_NOT_FOUND, `unknown profile_id ${profileId}`), accepted: false };
     }
     const selectedLane = String(laneId || profile.default_lane || "large");
+    if (!["large", "mini"].includes(selectedLane)) {
+      return { ...apiError(ErrorCode.LANE_INVALID, `lane_id must be 'large' or 'mini', got '${selectedLane}'`), accepted: false };
+    }
     if (!profile.allowed_lanes?.includes(selectedLane)) {
       return {
-        ok: false,
+        ...apiError(ErrorCode.LANE_NOT_ALLOWED, `${profile.profile_id} cannot run on lane ${selectedLane}`),
         accepted: false,
-        detail: `${profile.profile_id} cannot run on lane ${selectedLane}`,
       };
     }
+
+    // Profile policy enforcement: block manual_only_restore unless override=true.
+    const policy = profilePolicy(config, profile.profile_id);
+    const supportStatus = String(policy?.support_status || profile?.support_status || "").toLowerCase();
+    if (["manual_only_restore", "reserved_alpha"].includes(supportStatus) && !override) {
+      return {
+        ...apiError(
+          ErrorCode.POLICY_BLOCKED,
+          `Profile '${profile.profile_id}' has support_status='${supportStatus}' and cannot be activated via the API without override=true.`,
+        ),
+        accepted: false,
+      };
+    }
+
     const current = await currentState();
-    const workerState = await workerClearState();
+    const workerState = await workerClearState(config);
     const currentLane = current.lanes[selectedLane];
     if (currentLane?.profile_id === profile.profile_id && currentLane?.up) {
       await persistLaneState(selectedLane, profile);
@@ -1235,10 +1446,7 @@ export function createRuntime({
         mode: "lane",
         state: "ready",
         watchdog_enforce: true,
-        lane_targets: {
-          large: isLargeActivation(profile, selectedLane) ? profile.profile_id : "",
-          mini: isMiniActivation(profile, selectedLane) ? profile.profile_id : "",
-        },
+        lane_targets: laneTargetsForActivation({ selectedLane, profile, preserveOtherLane, otherLaneTarget }),
         fleet_id: "",
         status_detail: `${profile.profile_id} already active on ${selectedLane}`,
       });
@@ -1257,10 +1465,14 @@ export function createRuntime({
     }
     const currentOtherLane = selectedLane === "large" ? current.lanes?.mini : current.lanes?.large;
     const conflictingCurrent = [];
+    const preservingMatchingOtherLane = preserveOtherLane &&
+      currentOtherLane?.profile_id &&
+      currentOtherLane.up &&
+      String(currentOtherLane.profile_id) === String(otherLaneTarget || "");
     if (currentLane?.up && currentLane?.profile_id && currentLane.profile_id !== profile.profile_id) {
       conflictingCurrent.push(currentLane.profile_id);
     }
-    if (currentOtherLane?.profile_id && currentOtherLane.up) {
+    if (currentOtherLane?.profile_id && currentOtherLane.up && !preservingMatchingOtherLane) {
       conflictingCurrent.push(currentOtherLane.profile_id);
     }
     if (current.mini_fleet?.up) {
@@ -1268,11 +1480,30 @@ export function createRuntime({
     }
     if (!allowPreempt && conflictingCurrent.length > 0) {
       return {
-        ok: false,
+        ...apiError(ErrorCode.LANE_OCCUPIED, `requested activation would preempt ${conflictingCurrent.join(", ")}`),
         accepted: false,
-        detail: `requested activation would preempt ${conflictingCurrent.join(", ")}`,
       };
     }
+
+    // Dry-run: return the plan without executing.
+    if (dryRun) {
+      const adapter = adapterForProfile(config, profile);
+      return {
+        ok: true,
+        accepted: false,
+        code: ErrorCode.DRY_RUN_ONLY,
+        dry_run: true,
+        plan: {
+          profile_id: profile.profile_id,
+          lane_id: selectedLane,
+          would_preempt: conflictingCurrent,
+          launch_command_preview: `PORT=${shellQuote(String(config.lanes?.[selectedLane]?.port || 8000))} ${profile.launch_command}`,
+          expected_adapter: adapter,
+          startup_expectation: profile.startup_expectation,
+        },
+      };
+    }
+
     const jobId = uuid();
     const adapter = adapterForProfile(config, profile);
     const job = {
@@ -1291,102 +1522,117 @@ export function createRuntime({
       updated_at: currentIso(),
     };
     jobs.set(jobId, job);
+    metrics.activations_total++;
+
     const launch = async () => {
-      try {
-        const desiredBefore = await loadDesiredState();
-        await saveDesiredState({
-          ...desiredBefore,
-          mode: "lane",
-          state: "starting",
-          watchdog_enforce: false,
-          lane_targets: {
-            large: isLargeActivation(profile, selectedLane) ? profile.profile_id : "",
-            mini: isMiniActivation(profile, selectedLane) ? profile.profile_id : "",
-          },
-          fleet_id: "",
-          status_detail: `starting ${profile.profile_id} on ${selectedLane}`,
-        });
-        setJob(jobId, { status: "running", current_phase: "stopping_conflicts" });
-        if (allowPreempt) {
-          await stopFleet({ preserveDesiredState: true });
-          if (selectedLane === "large") {
-            await stopLane("mini", { preserveDesiredState: true });
-          } else {
-            await stopLane("large", { preserveDesiredState: true });
+      return withLaneLock(selectedLane, async () => {
+        const startMs = nowMs();
+        try {
+          const desiredBefore = await loadDesiredState();
+          await saveDesiredState({
+            ...desiredBefore,
+            mode: "lane",
+            state: "starting",
+            watchdog_enforce: false,
+            lane_targets: laneTargetsForActivation({ selectedLane, profile, preserveOtherLane, otherLaneTarget }),
+            fleet_id: "",
+            status_detail: `starting ${profile.profile_id} on ${selectedLane}`,
+          });
+          setJob(jobId, { status: "running", current_phase: "stopping_conflicts" });
+          if (allowPreempt) {
+            await stopFleet({ preserveDesiredState: true });
+            if (selectedLane === "large" && !preserveOtherLane) {
+              await stopLane("mini", { preserveDesiredState: true });
+            } else if (selectedLane === "mini" && !preserveOtherLane) {
+              await stopLane("large", { preserveDesiredState: true });
+            }
+            await stopLane(selectedLane, { preserveDesiredState: true });
+            setJob(jobId, { current_phase: "stopping_conflicts", status_detail: "waiting for ports to settle" });
+            await sleepImpl(5000);
           }
-          await stopLane(selectedLane, { preserveDesiredState: true });
-          setJob(jobId, { current_phase: "stopping_conflicts", status_detail: "waiting for ports to settle" });
-          await sleepImpl(5000);
-        }
-        if (profile.requires_both_boxes) {
-          const postStopWorkerState = await workerClearState();
-          if (!postStopWorkerState.clear) {
-            const detail = `worker gx10-b041 is not clear for dual-box launch; containers=${postStopWorkerState.blocking_containers.join(",") || "none"} ports=${postStopWorkerState.responsive_ports.join(",") || "none"}`;
+          if (profile.requires_both_boxes) {
+            const postStopWorkerState = await workerClearState(config);
+            if (!postStopWorkerState.clear) {
+              const detail = `worker gx10-b041 is not clear for dual-box launch; containers=${postStopWorkerState.blocking_containers.join(",") || "none"} ports=${postStopWorkerState.responsive_ports.join(",") || "none"}`;
+              const failedDesired = await loadDesiredState();
+              await saveDesiredState({
+                ...failedDesired,
+                state: "failed",
+                watchdog_enforce: false,
+                status_detail: detail,
+              });
+              setJob(jobId, { status: "failed", current_phase: "failed", status_detail: "worker gx10-b041 is not clear for dual-box launch" });
+              metrics.activations_failed++;
+              await appendJobHistory(jobHistoryPath, { ...jobs.get(jobId), code: ErrorCode.WORKER_NOT_CLEAR });
+              return;
+            }
+          }
+          setJob(jobId, { current_phase: "starting_runtime" });
+          const selectedLanePort = String(config.lanes?.[selectedLane]?.port || 8000);
+          const launchCommand = `PORT=${shellQuote(selectedLanePort)} ${profile.launch_command}`;
+          const result = await runCommandImpl(launchCommand, (profile.startup_expectation?.ready_timeout_s || 900) * 1000);
+          if (!result.ok) {
             const failedDesired = await loadDesiredState();
             await saveDesiredState({
               ...failedDesired,
               state: "failed",
               watchdog_enforce: false,
-              status_detail: detail,
+              status_detail: "launch failed",
             });
-            setJob(jobId, { status: "failed", current_phase: "failed", status_detail: detail });
+            logger.error("activate: launch failed", { profile_id: profile.profile_id, lane: selectedLane, stderr: result.stderr });
+            setJob(jobId, { status: "failed", current_phase: "failed", status_detail: "launch failed", code: ErrorCode.LAUNCH_FAILED });
+            metrics.activations_failed++;
+            await appendJobHistory(jobHistoryPath, jobs.get(jobId));
             return;
           }
-        }
-        setJob(jobId, { current_phase: "starting_runtime" });
-        const selectedLanePort = String(config.lanes?.[selectedLane]?.port || 8000);
-        const launchCommand = `PORT=${shellQuote(selectedLanePort)} ${profile.launch_command}`;
-        const result = await runCommandImpl(launchCommand, (profile.startup_expectation?.ready_timeout_s || 900) * 1000);
-        if (!result.ok) {
+          setJob(jobId, { current_phase: "waiting_for_api" });
+          const lanePort = config.lanes?.[selectedLane]?.port || 8000;
+          const ready = await waitForReady(lanePort, (profile.startup_expectation?.ready_timeout_s || 900) * 1000);
+          if (!ready) {
+            const failedDesired = await loadDesiredState();
+            await saveDesiredState({
+              ...failedDesired,
+              state: "failed",
+              watchdog_enforce: false,
+              status_detail: "runtime did not become ready",
+            });
+            setJob(jobId, { status: "failed", current_phase: "failed", status_detail: "runtime did not become ready", code: ErrorCode.ACTIVATION_TIMEOUT });
+            metrics.activations_failed++;
+            await appendJobHistory(jobHistoryPath, jobs.get(jobId));
+            return;
+          }
+          await persistLaneState(selectedLane, profile);
+          const readyDesired = await loadDesiredState();
+          await saveDesiredState({
+            ...readyDesired,
+            mode: "lane",
+            state: "ready",
+            watchdog_enforce: true,
+            lane_targets: laneTargetsForActivation({ selectedLane, profile, preserveOtherLane, otherLaneTarget }),
+            fleet_id: "",
+            status_detail: `${profile.profile_id} ready on ${selectedLane}`,
+          });
+          setJob(jobId, { status: "ready", current_phase: "ready", status_detail: "runtime ready" });
+          metrics.activations_ready++;
+          metrics.activation_duration_ms.push(nowMs() - startMs);
+          if (metrics.activation_duration_ms.length > 100) metrics.activation_duration_ms.shift();
+          await appendJobHistory(jobHistoryPath, jobs.get(jobId));
+          await fireWebhook("activation_ready", { profile_id: profile.profile_id, lane_id: selectedLane });
+        } catch (error) {
           const failedDesired = await loadDesiredState();
           await saveDesiredState({
             ...failedDesired,
             state: "failed",
             watchdog_enforce: false,
-            status_detail: result.error || result.stderr || "launch failed",
+            status_detail: "activation failed",
           });
-          setJob(jobId, { status: "failed", current_phase: "failed", status_detail: result.error || result.stderr || "launch failed" });
-          return;
+          logger.error("activate: unexpected error", { profile_id: profile.profile_id, error: String(error?.message || error) });
+          setJob(jobId, { status: "failed", current_phase: "failed", status_detail: "activation failed", code: ErrorCode.INTERNAL_ERROR });
+          metrics.activations_failed++;
+          await appendJobHistory(jobHistoryPath, jobs.get(jobId));
+          await fireWebhook("activation_failed", { profile_id: profile.profile_id, lane_id: selectedLane });
         }
-        setJob(jobId, { current_phase: "waiting_for_api" });
-        const lanePort = config.lanes?.[selectedLane]?.port || 8000;
-        const ready = await waitForReady(lanePort, (profile.startup_expectation?.ready_timeout_s || 900) * 1000);
-        if (!ready) {
-          const failedDesired = await loadDesiredState();
-          await saveDesiredState({
-            ...failedDesired,
-            state: "failed",
-            watchdog_enforce: false,
-            status_detail: "runtime did not become ready",
-          });
-          setJob(jobId, { status: "failed", current_phase: "failed", status_detail: "runtime did not become ready" });
-          return;
-        }
-        await persistLaneState(selectedLane, profile);
-        const readyDesired = await loadDesiredState();
-        await saveDesiredState({
-          ...readyDesired,
-          mode: "lane",
-          state: "ready",
-          watchdog_enforce: true,
-          lane_targets: {
-            large: isLargeActivation(profile, selectedLane) ? profile.profile_id : "",
-            mini: isMiniActivation(profile, selectedLane) ? profile.profile_id : "",
-          },
-          fleet_id: "",
-          status_detail: `${profile.profile_id} ready on ${selectedLane}`,
-        });
-        setJob(jobId, { status: "ready", current_phase: "ready", status_detail: "runtime ready" });
-      } catch (error) {
-        const failedDesired = await loadDesiredState();
-        await saveDesiredState({
-          ...failedDesired,
-          state: "failed",
-          watchdog_enforce: false,
-          status_detail: String(error?.message || error || "activation failed"),
-        });
-        setJob(jobId, { status: "failed", current_phase: "failed", status_detail: String(error?.message || error || "activation failed") });
-      }
+      });
     };
     if (wait) {
       await launch();
@@ -1394,6 +1640,272 @@ export function createRuntime({
     }
     launch();
     return jobs.get(jobId);
+  }
+
+  /** Append an entry to the activation audit log; self-caps at 500 rows via atomic rename. */
+  async function appendAuditLog(entry) {
+    try {
+      await mkdir(path.dirname(auditLogPath), { recursive: true });
+      let rows = [];
+      try {
+        const raw = await readFile(auditLogPath, "utf-8");
+        rows = raw.split("\n").filter(Boolean);
+      } catch { /* first run — file may not exist yet */ }
+      rows.push(JSON.stringify({ ts: new Date().toISOString(), ...entry }));
+      if (rows.length > 500) rows = rows.slice(-500);
+      const tmp = auditLogPath + ".tmp";
+      await writeFile(tmp, rows.join("\n") + "\n", "utf-8");
+      await rename(tmp, auditLogPath);
+    } catch (err) {
+      logger.warn("appendAuditLog failed", { error: String(err?.message || err) });
+    }
+  }
+
+  async function activateSet({ setId, wait = false, allowPreempt = true, dryRun = false, force = false } = {}) {
+    // ── Activation lock: one set activation at a time ────────────────────
+    if (_activating) {
+      const eta = new Date(_activatingStartMs + 300000).toISOString();
+      return {
+        ok: false,
+        accepted: false,
+        code: ErrorCode.CONCURRENT_ACTIVATION,
+        detail: `activation in progress for set '${_activatingSetId}' — try again later`,
+        active_set_id: _activatingSetId,
+        estimated_ready_at: eta,
+      };
+    }
+
+    const config = await loadValidatedConfig();
+
+    // ── set_id format validation ─────────────────────────────────────────────
+    if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(setId)) {
+      return { ...apiError(ErrorCode.INPUT_INVALID, `set_id must match ^[a-z0-9][a-z0-9_-]{0,62}$ — got '${setId}'`), accepted: false };
+    }
+
+    const activationSet = activationSetById(config, setId);
+    if (!activationSet) {
+      return { ...apiError(ErrorCode.SET_NOT_FOUND, `unknown activation set '${setId}'`), accepted: false };
+    }
+
+    // ── Idempotency: skip if already active and healthy ───────────────────────
+    if (!force && !dryRun) {
+      const existingState = await loadDesiredState();
+      if (String(existingState.active_set_id || "") === setId) {
+        const largeLanePort = config.lanes?.large?.port || 8000;
+        try {
+          const healthResp = await fetch(`http://127.0.0.1:${largeLanePort}/health`, {
+            signal: AbortSignal.timeout(5000),
+          });
+          if (healthResp.ok) {
+            logger.info("activate-set: idempotent skip", { set_id: setId });
+            return {
+              ok: true,
+              accepted: false,
+              status: "skipped",
+              set_id: setId,
+              detail: `set '${setId}' is already active and healthy`,
+              skipped: true,
+            };
+          }
+        } catch { /* health check failed — proceed with full activation */ }
+      }
+    }
+
+    const largeProfileId = String(activationSet?.lane_targets?.large || "").trim();
+    const miniProfileId = String(activationSet?.lane_targets?.mini || "").trim();
+    const largeProfile = largeProfileId ? profileById(config, largeProfileId) : null;
+    const miniProfile = miniProfileId ? profileById(config, miniProfileId) : null;
+    if (largeProfileId && !largeProfile) {
+      return { ...apiError(ErrorCode.PROFILE_NOT_FOUND, `unknown profile_id ${largeProfileId}`), accepted: false };
+    }
+    if (miniProfileId && !miniProfile) {
+      return { ...apiError(ErrorCode.PROFILE_NOT_FOUND, `unknown profile_id ${miniProfileId}`), accepted: false };
+    }
+    if (!largeProfile && !miniProfile) {
+      return { ...apiError(ErrorCode.INPUT_INVALID, `activation set ${setId} has no lane targets`), accepted: false };
+    }
+    if (largeProfile && !largeProfile.allowed_lanes?.includes("large")) {
+      return {
+        ...apiError(ErrorCode.LANE_NOT_ALLOWED, `${largeProfile.profile_id} cannot run on lane large`),
+        accepted: false,
+      };
+    }
+    if (miniProfile && !miniProfile.allowed_lanes?.includes("mini")) {
+      return {
+        ...apiError(ErrorCode.LANE_NOT_ALLOWED, `${miniProfile.profile_id} cannot run on lane mini`),
+        accepted: false,
+      };
+    }
+
+    const current = await currentState();
+    const conflictingCurrent = [];
+    if (current.lanes?.large?.profile_id && current.lanes.large.up && current.lanes.large.profile_id !== largeProfileId) {
+      conflictingCurrent.push(current.lanes.large.profile_id);
+    }
+    if (current.lanes?.mini?.profile_id && current.lanes.mini.up && current.lanes.mini.profile_id !== miniProfileId) {
+      conflictingCurrent.push(current.lanes.mini.profile_id);
+    }
+    if (current.mini_fleet?.up) {
+      conflictingCurrent.push(current.mini_fleet.fleet_id || "mini_fleet");
+    }
+    if (!allowPreempt && conflictingCurrent.length > 0) {
+      return {
+        ...apiError(ErrorCode.LANE_OCCUPIED, `requested activation set would preempt ${Array.from(new Set(conflictingCurrent)).join(", ")}`),
+        accepted: false,
+      };
+    }
+
+    if (dryRun) {
+      return {
+        ok: true,
+        accepted: false,
+        code: ErrorCode.DRY_RUN_ONLY,
+        dry_run: true,
+        plan: {
+          set_id: String(activationSet.set_id || ""),
+          display_name: String(activationSet.display_name || ""),
+          lane_targets: {
+            large: largeProfileId,
+            mini: miniProfileId,
+          },
+          would_preempt: Array.from(new Set(conflictingCurrent)),
+          startup_expectation: {
+            large: largeProfile?.startup_expectation || null,
+            mini: miniProfile?.startup_expectation || null,
+          },
+        },
+      };
+    }
+
+    _activating = true;
+    _activatingSetId = setId;
+    _activatingStartMs = nowMs();
+    const _activationSetStartMs = nowMs();
+    const jobId = uuid();
+    const job = {
+      ok: true,
+      accepted: true,
+      job_id: jobId,
+      requested_profile_id: String(activationSet.set_id || ""),
+      lane_id: "set",
+      expected_runtime: "mixed",
+      expected_adapter: {
+        large: largeProfile ? adapterForProfile(config, largeProfile) : null,
+        mini: miniProfile ? adapterForProfile(config, miniProfile) : null,
+      },
+      expected_catalog_url: largeProfile ? adapterForProfile(config, largeProfile).models_url : miniProfile ? adapterForProfile(config, miniProfile).models_url : "",
+      startup_expectation: {
+        large: largeProfile?.startup_expectation || null,
+        mini: miniProfile?.startup_expectation || null,
+      },
+      current_phase: "queued",
+      status: "queued",
+      started_at_ms: nowMs(),
+      updated_at: currentIso(),
+    };
+    jobs.set(jobId, job);
+
+    const launch = async () => {
+      try {
+        if (largeProfile) {
+          setJob(jobId, { status: "running", current_phase: "activating_large", status_detail: `starting ${largeProfile.profile_id} on large` });
+          const largeResult = await activate({
+            profileId: largeProfile.profile_id,
+            laneId: "large",
+            wait: true,
+            allowPreempt,
+            preserveOtherLane: Boolean(miniProfile),
+            otherLaneTarget: miniProfile?.profile_id || "",
+          });
+          if (String(largeResult?.status || "") !== "ready") {
+            setJob(jobId, {
+              status: "failed",
+              current_phase: "failed",
+              status_detail: largeResult?.status_detail || `failed to activate ${largeProfile.profile_id}`,
+              code: largeResult?.code || ErrorCode.INTERNAL_ERROR,
+            });
+            return;
+          }
+        }
+
+        if (miniProfile) {
+          setJob(jobId, { status: "running", current_phase: "activating_mini", status_detail: `starting ${miniProfile.profile_id} on mini` });
+          const miniResult = await activate({
+            profileId: miniProfile.profile_id,
+            laneId: "mini",
+            wait: true,
+            allowPreempt,
+            preserveOtherLane: Boolean(largeProfile),
+            otherLaneTarget: largeProfile?.profile_id || "",
+          });
+          if (String(miniResult?.status || "") !== "ready") {
+            setJob(jobId, {
+              status: "failed",
+              current_phase: "failed",
+              status_detail: miniResult?.status_detail || `failed to activate ${miniProfile.profile_id}`,
+              code: miniResult?.code || ErrorCode.INTERNAL_ERROR,
+            });
+            return;
+          }
+        }
+
+        const laneTargets = {
+          large: largeProfileId,
+          mini: miniProfileId || null,
+        };
+        await saveDesiredState({
+          mode: "lane",
+          state: "ready",
+          watchdog_enforce: true,
+          lane_targets: laneTargets,
+          active_set_id: setId,
+          schema_version: 2,
+          fleet_id: "",
+          status_detail: largeProfileId && miniProfileId
+            ? `${largeProfileId} ready on large + ${miniProfileId} ready on mini`
+            : largeProfileId
+              ? `${largeProfileId} ready on large`
+              : `${miniProfileId} ready on mini`,
+        });
+        setJob(jobId, { status: "ready", current_phase: "ready", status_detail: "activation set ready" });
+        await appendAuditLog({ action: "activate-set", set_id: setId, ok: true, elapsed_ms: nowMs() - _activationSetStartMs });
+      } catch (error) {
+        const _errDetail = String(error?.message || error || "activation set failed");
+        setJob(jobId, {
+          status: "failed",
+          current_phase: "failed",
+          status_detail: _errDetail,
+          code: ErrorCode.INTERNAL_ERROR,
+        });
+        await appendAuditLog({ action: "activate-set", set_id: setId, ok: false, error: _errDetail, elapsed_ms: nowMs() - _activationSetStartMs });
+        logger.error("activateSet: unexpected error", { set_id: setId, error: _errDetail });
+      } finally {
+        _activating = false;
+        _activatingSetId = "";
+      }
+    };
+
+    if (wait) {
+      await launch();
+      return jobs.get(jobId);
+    }
+    launch();
+    return jobs.get(jobId);
+  }
+
+  /** Fire a webhook event if LLMCOMMUNE_WEBHOOK_URL is set. Never throws. */
+  async function fireWebhook(eventType, payload) {
+    if (!webhookUrl) return;
+    try {
+      await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: eventType, generated_at: currentIso(), ...payload }),
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch (error) {
+      logger.warn("webhook delivery failed", { url: webhookUrl, event: eventType, error: String(error?.message || error) });
+    }
   }
 
   async function restartLane(laneId) {
@@ -1405,19 +1917,112 @@ export function createRuntime({
     return activate({ profileId: lane.profile_id, laneId, wait: true, allowPreempt: true });
   }
 
+  // ── Activation-set catalog management ────────────────────────────────────
+
+  function allActivationSets(config) {
+    return (config.controller?.activation_sets || []);
+  }
+
+  async function getActivationSets() {
+    const config = await loadValidatedConfig();
+    const desired = await loadDesiredState();
+    const activeSetId = String(desired.active_set_id || "");
+    return {
+      ok: true,
+      sets: allActivationSets(config).map((s) => ({
+        set_id: String(s.set_id || ""),
+        display_name: String(s.display_name || ""),
+        description: String(s.description || ""),
+        requires_dual_box: Boolean(s.requires_dual_box),
+        lane_targets: {
+          large: s.lane_targets?.large || null,
+          mini: s.lane_targets?.mini || null,
+        },
+        currently_active: String(s.set_id || "") === activeSetId,
+      })),
+      currently_active_set_id: activeSetId || null,
+      total: allActivationSets(config).length,
+    };
+  }
+
+  const MAX_SETS = 50;
+
+  async function registerActivationSet({ setId, displayName, description, laneTargets, persist = false } = {}) {
+    const sid = String(setId || "").trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(sid)) {
+      return { ...apiError(ErrorCode.INPUT_INVALID, `set_id must match ^[a-z0-9][a-z0-9_-]{0,62}$`), accepted: false };
+    }
+    const config = await loadValidatedConfig();
+    const sets = allActivationSets(config);
+    if (sets.length >= MAX_SETS) {
+      return { ...apiError(ErrorCode.SET_LIMIT_REACHED, `cannot exceed ${MAX_SETS} registered activation sets`), accepted: false };
+    }
+    if (sets.find((s) => s.set_id === sid)) {
+      return { ...apiError(ErrorCode.INPUT_INVALID, `set_id '${sid}' already registered`), accepted: false };
+    }
+    // Validate profile IDs exist in catalog
+    const profiles = config.profiles || [];
+    const profileIds = new Set(profiles.map((p) => p.profile_id));
+    const largeId = String(laneTargets?.large || "").trim();
+    const miniId = String(laneTargets?.mini || "").trim();
+    if (largeId && !profileIds.has(largeId)) {
+      return { ...apiError(ErrorCode.PROFILE_NOT_FOUND, `unknown profile_id '${largeId}' for lane_targets.large`), accepted: false };
+    }
+    if (miniId && !profileIds.has(miniId)) {
+      return { ...apiError(ErrorCode.PROFILE_NOT_FOUND, `unknown profile_id '${miniId}' for lane_targets.mini`), accepted: false };
+    }
+    if (!largeId && !miniId) {
+      return { ...apiError(ErrorCode.INPUT_INVALID, "lane_targets must include at least one of large or mini"), accepted: false };
+    }
+    const newSet = {
+      set_id: sid,
+      display_name: String(displayName || sid),
+      description: String(description || ""),
+      requires_dual_box: false,
+      lane_targets: { large: largeId || null, mini: miniId || null },
+    };
+    config.controller.activation_sets.push(newSet);
+    _validatedConfig = config;  // update in-memory cache
+    if (persist) {
+      await writeJsonImpl(configPath, config);
+    }
+    logger.info("registerActivationSet", { set_id: sid, persist });
+    return { ok: true, accepted: true, set_id: sid, persisted: persist };
+  }
+
+  async function deleteActivationSet(setId) {
+    const sid = String(setId || "").trim();
+    const config = await loadValidatedConfig();
+    const desired = await loadDesiredState();
+    if (String(desired.active_set_id || "") === sid) {
+      return { ...apiError(ErrorCode.SET_ACTIVE, `cannot delete active set '${sid}' — deactivate first`), accepted: false };
+    }
+    const before = allActivationSets(config).length;
+    config.controller.activation_sets = allActivationSets(config).filter((s) => s.set_id !== sid);
+    if (config.controller.activation_sets.length === before) {
+      return { ...apiError(ErrorCode.SET_NOT_FOUND, `unknown activation set '${sid}'`), accepted: false };
+    }
+    _validatedConfig = config;
+    await writeJsonImpl(configPath, config);
+    logger.info("deleteActivationSet", { set_id: sid });
+    return { ok: true, deleted: sid };
+  }
+
   async function bonzai() {
-    const config = await loadConfig();
+    const config = await loadValidatedConfig();
     await stopLane("large");
-    return activate({
+    const result = await activate({
       profileId: config.controller?.bonzai_profile_id || "gguf_coder_next_large",
       laneId: "large",
       wait: true,
       allowPreempt: true,
     });
+    await fireWebhook("bonzai", { result_status: result?.status || "unknown" });
+    return result;
   }
 
   async function fleetUp({ wait = false } = {}) {
-    const config = await loadConfig();
+    const config = await loadValidatedConfig();
     const fleet = Array.isArray(config.fleet_profiles) ? config.fleet_profiles[0] || null : null;
     if (!fleet) {
       return { ok: false, detail: "no fleet configured" };
@@ -1431,7 +2036,7 @@ export function createRuntime({
       lane_id: "mini_fleet",
       expected_runtime: "mixed",
       expected_adapter: null,
-      expected_catalog_url: "http://192.168.1.203:7999/v1/models",
+      expected_catalog_url: `http://${config.hosts?.spark?.public_host || "192.168.1.203"}:7999/v1/models`,
       startup_expectation: fleet.startup_expectation || null,
       current_phase: "queued",
       status: "queued",
@@ -1635,7 +2240,7 @@ export function createRuntime({
           current_phase: "stopping_conflicts",
           status_detail: wait ? "fleet down command completed; verifying shutdown" : `fleet-down launcher pid ${started.pid}`,
         });
-        const stopped = await waitForFleet(await loadConfig(), false, 180000);
+        const stopped = await waitForFleet(await loadValidatedConfig(), false, 180000);
         if (!stopped) {
           await saveDesiredState({
             ...(await loadDesiredState()),
@@ -1689,19 +2294,87 @@ export function createRuntime({
     return payload;
   }
 
+  /** Deep health check — probes actual dependencies. */
+  async function deepHealth() {
+    const checks = {};
+
+    // State file readable?
+    try {
+      await readFile(desiredStatePath, "utf-8");
+      checks.state_file = "ok";
+    } catch {
+      checks.state_file = "missing";
+    }
+
+    // Watchdog PID alive?
+    try {
+      const raw = await readFile(path.join(stateRoot, "watchdog-4000.pid"), "utf-8");
+      const pid = Number(raw.trim());
+      process.kill(pid, 0);
+      checks.watchdog = "ok";
+    } catch {
+      checks.watchdog = "dead_or_missing";
+    }
+
+    // Large lane port responsive?
+    const largeLane = await probeRuntimeImpl("http://127.0.0.1:8000");
+    checks.large_lane = largeLane.up ? "up" : "down";
+
+    // Mini lane port responsive?
+    const miniLane = await probeRuntimeImpl("http://127.0.0.1:7999");
+    checks.mini_lane = miniLane.up ? "up" : "down";
+
+    const ok = checks.state_file !== "missing";
+    return { ok, checks };
+  }
+
+  /** Export Prometheus-compatible text metrics. */
+  function metricsText() {
+    const avgDuration = metrics.activation_duration_ms.length > 0
+      ? (metrics.activation_duration_ms.reduce((a, b) => a + b, 0) / metrics.activation_duration_ms.length / 1000).toFixed(3)
+      : "0";
+    return [
+      `# HELP llmcommune_activations_total Total activation requests`,
+      `# TYPE llmcommune_activations_total counter`,
+      `llmcommune_activations_total ${metrics.activations_total}`,
+      `# HELP llmcommune_activations_failed_total Failed activations`,
+      `# TYPE llmcommune_activations_failed_total counter`,
+      `llmcommune_activations_failed_total ${metrics.activations_failed}`,
+      `# HELP llmcommune_activations_ready_total Successful activations`,
+      `# TYPE llmcommune_activations_ready_total counter`,
+      `llmcommune_activations_ready_total ${metrics.activations_ready}`,
+      `# HELP llmcommune_activation_duration_seconds_avg Average activation duration`,
+      `# TYPE llmcommune_activation_duration_seconds_avg gauge`,
+      `llmcommune_activation_duration_seconds_avg ${avgDuration}`,
+      `# HELP llmcommune_probe_failures_total Total probe failures`,
+      `# TYPE llmcommune_probe_failures_total counter`,
+      `llmcommune_probe_failures_total ${metrics.probe_failures_total}`,
+      `# HELP llmcommune_active_jobs Current in-memory job count`,
+      `# TYPE llmcommune_active_jobs gauge`,
+      `llmcommune_active_jobs ${jobs.size}`,
+    ].join("\n") + "\n";
+  }
+
   return {
     getHelp: helpState,
     getCurrent: currentState,
     listModels: modelsState,
     activate,
+    activateSet,
+    getActivationSets,
+    registerActivationSet,
+    deleteActivationSet,
     restartLane,
     stopLane,
     bonzai,
     fleetUp,
     fleetDown,
+    deepHealth,
+    metricsText,
+    startupChecks,
     getJob(jobId) {
-      const job = jobs.get(jobId);
-      if (!job) return { ok: false, detail: "job not found" };
+      const job = jobs.get(String(jobId || "").trim());
+      if (!job) return { ...apiError(ErrorCode.JOB_NOT_FOUND, "job not found"), ok: false };
       return { ok: true, ...job };
     },
     writeInventorySnapshot,

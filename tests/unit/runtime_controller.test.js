@@ -624,6 +624,10 @@ trackedTest("http routes expose the controller contract", async () => {
       calls.push(["fleetDown", payload]);
       return { ok: true, accepted: true };
     },
+    async deepHealth() {
+      calls.push(["deepHealth"]);
+      return { ok: true, checks: {} };
+    },
     async writeInventorySnapshot() {
       calls.push(["snapshot"]);
       return { ok: true, snapshot: true };
@@ -682,6 +686,8 @@ trackedTest("http routes expose the controller contract", async () => {
       laneId: "large",
       wait: true,
       allowPreempt: false,
+      dryRun: false,
+      override: false,
     });
   } finally {
     await server.close();
