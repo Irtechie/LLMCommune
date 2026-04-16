@@ -294,6 +294,14 @@ export function createRuntime({
         }
       }
     }
+    // Startup reconciliation: if desired_state names an unknown active_set_id, null it out.
+    const desiredState = await loadDesiredState();
+    const knownSetIds = new Set((config.controller?.activation_sets || []).map((s) => String(s.set_id || "")));
+    const storedSetId = String(desiredState.active_set_id || "").trim();
+    if (storedSetId && !knownSetIds.has(storedSetId)) {
+      logger.warn("startup: desired_state.active_set_id not in catalog — clearing", { active_set_id: storedSetId });
+      await saveDesiredState({ ...desiredState, active_set_id: null });
+    }
   }
 
   async function loadDesiredState() {
@@ -1753,6 +1761,18 @@ export function createRuntime({
         ...apiError(ErrorCode.LANE_OCCUPIED, `requested activation set would preempt ${Array.from(new Set(conflictingCurrent)).join(", ")}`),
         accepted: false,
       };
+    }
+
+    // ── Dual-box reachability pre-check (fail fast before stopping anything) ──
+    if (activationSet.requires_dual_box) {
+      const gx10Check = await runCommandImpl(`ssh ${workerSshOptions} ${shellQuote(workerSsh)} "exit 0"`, 12000);
+      if (!gx10Check.ok) {
+        logger.warn("activate-set: gx10-b041 unreachable for dual-box set", { set_id: setId });
+        return {
+          ...apiError(ErrorCode.HARDWARE_UNAVAILABLE, `set '${setId}' requires dual-box but gx10-b041 is unreachable`),
+          accepted: false,
+        };
+      }
     }
 
     if (dryRun) {

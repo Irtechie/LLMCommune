@@ -1,3 +1,4 @@
+// @ts-check
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,6 +6,7 @@ import {
   defaultDesiredState,
   planWatchdogActions,
 } from "./watchdog_logic.js";
+import { logger } from "./logger.js";
 
 function createFetchJson(fetchImpl = fetch) {
   return async function fetchJson(url, timeoutMs = 3000) {
@@ -102,7 +104,8 @@ export function createWatchdog({
 
   let stopping = false;
   let intervalHandle = null;
-  const actionCooldowns = new Map();
+  const actionCooldowns = new Map(); // key -> { lastTs, failCount }
+  const MAX_FAIL_COUNT = 8; // after this many failures, circuit opens and lane is left DARK
 
   function isoNow() {
     return new Date(nowMs()).toISOString();
@@ -114,7 +117,20 @@ export function createWatchdog({
 
   async function appendWatchdogLog(message) {
     await ensureRuntimeRoot();
-    await writeFileImpl(watchdogLogPath, `[${isoNow()}] ${message}\n`, { encoding: "utf-8", flag: "a" });
+    const line = JSON.stringify({ ts: isoNow(), msg: message }) + "\n";
+    await writeFileImpl(watchdogLogPath, line, { encoding: "utf-8", flag: "a" });
+    logger.info(message, { watchdog: true });
+  }
+
+  /** Exponential backoff per key: base * 2^failCount, capped at 5 minutes. */
+  function backoffMs(failCount) {
+    return Math.min(actionCooldownMs * Math.pow(2, failCount), 300000);
+  }
+
+  function cooldownReady(key) {
+    const entry = actionCooldowns.get(key);
+    if (!entry) return true;
+    return nowMs() - entry.lastTs >= backoffMs(entry.failCount);
   }
 
   async function writePid(filePath, pid) {
@@ -157,24 +173,39 @@ export function createWatchdog({
   }
 
   function cooldownReady(key) {
-    const lastTs = Number(actionCooldowns.get(key) || 0);
-    return nowMs() - lastTs >= actionCooldownMs;
+    const entry = actionCooldowns.get(key);
+    if (!entry) return true;
+    return nowMs() - entry.lastTs >= backoffMs(entry.failCount);
   }
 
-  function markCooldown(key) {
-    actionCooldowns.set(key, nowMs());
+  function markCooldownResult(key, success) {
+    const prev = actionCooldowns.get(key) || { lastTs: 0, failCount: 0 };
+    actionCooldowns.set(key, {
+      lastTs: nowMs(),
+      failCount: success ? 0 : prev.failCount + 1,
+    });
   }
 
   async function triggerAction(action) {
+    const circuitEntry = actionCooldowns.get(action.key);
+    if (circuitEntry && circuitEntry.failCount >= MAX_FAIL_COUNT) {
+      if (circuitEntry.failCount === MAX_FAIL_COUNT) {
+        await appendWatchdogLog(`circuit open: ${action.key} failed ${MAX_FAIL_COUNT} times — lane left DARK, manual intervention required`);
+        // Bump failCount past threshold so we only log once
+        actionCooldowns.set(action.key, { ...circuitEntry, failCount: MAX_FAIL_COUNT + 1 });
+      }
+      return false;
+    }
     if (!cooldownReady(action.key)) return false;
-    markCooldown(action.key);
     await appendWatchdogLog(`triggering ${action.label}`);
     const result = await postJsonImpl(`http://127.0.0.1:${controllerPort}${action.pathName}`, action.payload, 30000);
     if (!result.ok) {
       await appendWatchdogLog(`action failed ${action.label}: ${result.error || JSON.stringify(result.body || {})}`);
+      markCooldownResult(action.key, false);
       return false;
     }
     await appendWatchdogLog(`action accepted ${action.label}: status=${result.status}`);
+    markCooldownResult(action.key, true);
     return true;
   }
 
