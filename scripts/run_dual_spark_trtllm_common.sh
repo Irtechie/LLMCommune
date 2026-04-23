@@ -5,7 +5,7 @@ PRIMARY_LINK_IP="${PRIMARY_LINK_IP:-169.254.10.1}"
 WORKER_LINK_IP="${WORKER_LINK_IP:-169.254.10.2}"
 WORKER_SSH="${WORKER_SSH:-admin@192.168.1.204}"
 WORKER_SSH_OPTS="${WORKER_SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /home/admin/.ssh/trtllm_ed25519}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.0.0rc3}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc5}"
 CONTAINER_NAME="${CONTAINER_NAME:-trtllm-multinode}"
 SLOT_LABEL="${SLOT_LABEL:-shared_trtllm}"
 HOSTFILE_PATH="${HOSTFILE_PATH:-$HOME/openmpi-hostfile}"
@@ -22,13 +22,14 @@ SKIP_API_WAIT="${SKIP_API_WAIT:-0}"
 MAX_NUM_TOKENS="${MAX_NUM_TOKENS:-131072}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
 MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-1}"
-FREE_GPU_MEMORY_FRACTION="${FREE_GPU_MEMORY_FRACTION:-0.95}"
+FREE_GPU_MEMORY_FRACTION="${FREE_GPU_MEMORY_FRACTION:-0.9}"
 UCX_NET_DEVICES="${UCX_NET_DEVICES:-enp1s0f0np0}"
 NCCL_IB_HCA="${NCCL_IB_HCA:-rocep1s0f0}"
 NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
 MODEL_SPEC="${MODEL_SPEC:?MODEL_SPEC is required}"
 EXTRA_SETUP_SCRIPT="${EXTRA_SETUP_SCRIPT:-}"
+TRTLLM_CONFIG_PATH="${TRTLLM_CONFIG_PATH:-}"
 MPI_SSH_KEY="${MPI_SSH_KEY:-/root/.ssh/trtllm_ed25519}"
 HF_OFFLINE="${HF_OFFLINE:-0}"
 TIKTOKEN_RS_CACHE_DIR="${TIKTOKEN_RS_CACHE_DIR:-/tmp/harmony-reqs}"
@@ -505,12 +506,20 @@ export C_INCLUDE_PATH=/usr/local/cuda/include:\${C_INCLUDE_PATH:-}
 export CPLUS_INCLUDE_PATH=/usr/local/cuda/include:\${CPLUS_INCLUDE_PATH:-}
 export CUDA_HOME=/usr/local/cuda
 export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+export TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL=1
 export PATH=/usr/local/cuda/bin:\${PATH:-}
 export TIKTOKEN_RS_CACHE_DIR='$TIKTOKEN_RS_CACHE_DIR'
 export TIKTOKEN_CACHE_DIR='$TIKTOKEN_CACHE_DIR'
 export TIKTOKEN_ENCODINGS_BASE='$TIKTOKEN_ENCODINGS_BASE'
 export TORCH_CUDA_ARCH_LIST='$TORCH_CUDA_ARCH_LIST'
+CONFIG_PATH_VALUE='${TRTLLM_CONFIG_PATH}'
 MAX_SEQ_LEN_VALUE='${MAX_SEQ_LEN}'
+CONFIG_ARGS=()
+if [[ -n "\$CONFIG_PATH_VALUE" ]]; then
+  CONFIG_ARGS+=(--config "\$CONFIG_PATH_VALUE")
+else
+  CONFIG_ARGS+=(--extra_llm_api_options /tmp/extra-llm-api-config.yml)
+fi
 MAX_SEQ_ARGS=()
 if [[ -n "\$MAX_SEQ_LEN_VALUE" ]]; then
   MAX_SEQ_ARGS+=(--max_seq_len "\$MAX_SEQ_LEN_VALUE")
@@ -530,6 +539,7 @@ exec mpirun \
   -x CPLUS_INCLUDE_PATH \
   -x CUDA_HOME \
   -x TRITON_PTXAS_PATH \
+  -x TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL \
   -x PATH \
   -x TIKTOKEN_RS_CACHE_DIR \
   -x TIKTOKEN_CACHE_DIR \
@@ -546,7 +556,7 @@ exec mpirun \
     --max_num_tokens $MAX_NUM_TOKENS \
     "\${MAX_SEQ_ARGS[@]}" \
     --max_batch_size $MAX_BATCH_SIZE \
-    --extra_llm_api_options /tmp/extra-llm-api-config.yml \
+    "\${CONFIG_ARGS[@]}" \
     --port $PORT
 EOF
 chmod +x /tmp/start-trtllm-$PORT.sh"
