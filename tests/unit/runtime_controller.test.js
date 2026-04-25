@@ -122,6 +122,126 @@ trackedTest("activate returns ready immediately for an already-active profile", 
   }
 });
 
+trackedTest("activate returns ready for an already-active manual_only_restore profile", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    const commands = [];
+    await seedLaneSlot(fixture.repoRoot, "large", {
+      profile_id: "trt_dual_qwen235_large",
+      slot_label: "trt_dual_qwen235_large",
+      model_spec: "/mnt/models/nvidia/Qwen3-235B-A22B-NVFP4/files",
+    });
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          commands.push(command);
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: true, model_ids: ["Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"], raw: {} },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+        uuid: () => "job-already-active-manual-restore",
+      },
+    });
+
+    const result = await runtime.activate({
+      profileId: "trt_dual_qwen235_large",
+      laneId: "large",
+      wait: true,
+    });
+
+    assert.equal(result.status, "ready");
+    assert.match(result.status_detail, /already active/i);
+    assert.equal(result.code, undefined);
+    assert.equal(commands.length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("activateSet restores combo back to solo when the large lane is already active", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    const commands = [];
+    let miniRunning = true;
+    await seedLaneSlot(fixture.repoRoot, "large", {
+      profile_id: "trt_dual_qwen235_large",
+      slot_label: "trt_dual_qwen235_large",
+      model_spec: "/mnt/models/nvidia/Qwen3-235B-A22B-NVFP4/files",
+    });
+    await seedLaneSlot(fixture.repoRoot, "mini", {
+      profile_id: "trt_single_qwen3_32b_mini",
+      slot_label: "trt_single_qwen3_32b_mini",
+      model_spec: "/mnt/models/nvidia/Qwen3-32B/files",
+    });
+    await seedDesiredState(fixture.repoRoot, {
+      mode: "lane",
+      state: "ready",
+      watchdog_enforce: true,
+      lane_targets: {
+        large: "trt_dual_qwen235_large",
+        mini: "trt_single_qwen3_32b_mini",
+      },
+      fleet_id: "",
+      active_set_id: "qwen235-qwen32mini",
+      status_detail: "combo ready",
+    });
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          if (isWorkerContainerInspection(command)) {
+            return { ok: true, stdout: "", stderr: "" };
+          }
+          if (command.includes("stop_mini_lane.sh")) {
+            miniRunning = false;
+          }
+          commands.push(command);
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: async (baseUrl) => {
+          if (baseUrl === "http://127.0.0.1:8000") {
+            return { up: true, model_ids: ["files"], raw: {} };
+          }
+          if (baseUrl === "http://127.0.0.1:7999" || baseUrl === "http://127.0.0.1:7999/") {
+            return miniRunning
+              ? { up: true, model_ids: ["files"], raw: {} }
+              : { up: false, model_ids: [], raw: null };
+          }
+          if (baseUrl === "http://192.168.1.203:7999" || baseUrl === "http://192.168.1.204:7999") {
+            return { up: false, model_ids: [], raw: null };
+          }
+          return { up: false, model_ids: [], raw: null };
+        },
+        uuid: () => "job-restore-combo-to-solo",
+      },
+    });
+
+    const result = await runtime.activateSet({
+      setId: "qwen235",
+      wait: true,
+    });
+
+    assert.equal(result.status, "ready");
+    assert.equal(result.requested_profile_id, "qwen235");
+    assert.ok(commands.some((command) => command.includes("stop_mini_lane.sh")));
+    assert.ok(commands.every((command) => !command.includes("run_dual_spark_trtllm_common.sh")));
+
+    const current = await runtime.getCurrent();
+    assert.equal(current.desired_state.active_set_id, "qwen235");
+    assert.equal(current.lanes.large.profile_id, "trt_dual_qwen235_large");
+    assert.equal(current.lanes.mini.up, false);
+    assert.equal(current.lanes.mini.profile_id, "");
+    assert.ok(!current.desired_state.lane_targets.mini);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 trackedTest("large activation clears fleet, mini, then large before launching", async () => {
   const fixture = await createRepoFixture();
   try {
@@ -581,6 +701,271 @@ trackedTest("controller prefers commune lane slot metadata over stale shared act
   }
 });
 
+trackedTest("studio summary surfaces evidence-backed presets, defaults, and recommendations", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    await writeFile(
+      path.join(fixture.repoRoot, "workspace", "bakeoff_results.json"),
+      `${JSON.stringify([
+        {
+          model: "Sparksolo Coder Next GGUF",
+          engine: "llama.cpp",
+          spinup_seconds: 21,
+          tokens_per_second: 91,
+          quality_score: "9.3",
+          quality_notes: "solo winner",
+          file: "sparksolo_coder_next_gguf.json",
+        },
+        {
+          model: "Sparkcombo Coder Next GGUF",
+          engine: "llama.cpp",
+          spinup_seconds: 24,
+          tokens_per_second: 84,
+          quality_score: "8.7",
+          quality_notes: "combo winner",
+          file: "sparkcombo_coder_next_gguf.json",
+        },
+      ], null, 2)}\n`,
+      "utf-8",
+    );
+
+    const runtime = createRuntime({ repoRoot: fixture.repoRoot });
+
+    const soloDraft = await runtime.saveStudioDraft({
+      draftId: "draft-sparksolo",
+      presetId: "sparksolo_coder",
+      displayName: "Sparksolo Coder",
+      description: "Solo preset",
+      laneTargets: { large: "gguf_coder_next_large", mini: null },
+    });
+    assert.equal(soloDraft.ok, true);
+    const soloPublished = await runtime.publishStudioDraft({ draftId: "draft-sparksolo", persist: true });
+    assert.equal(soloPublished.ok, true);
+    assert.equal(soloPublished.published_revision, 1);
+
+    const comboDraft = await runtime.saveStudioDraft({
+      draftId: "draft-sparkcombo",
+      presetId: "sparkcombo_coder",
+      displayName: "Sparkcombo Coder",
+      description: "Combo preset",
+      laneTargets: { large: "gguf_coder_next_large", mini: "trt_single_qwen3_30b_a3b_mini" },
+    });
+    assert.equal(comboDraft.ok, true);
+    const comboPublished = await runtime.publishStudioDraft({ draftId: "draft-sparkcombo", persist: true });
+    assert.equal(comboPublished.ok, true);
+    assert.equal(comboPublished.published_revision, 1);
+
+    const soloDefault = await runtime.setStudioDefault({
+      mode: "solo",
+      presetId: "sparksolo_coder",
+      publishedRevision: 1,
+    });
+    const comboDefault = await runtime.setStudioDefault({
+      mode: "combo",
+      presetId: "sparkcombo_coder",
+      publishedRevision: 1,
+    });
+    assert.equal(soloDefault.ok, true);
+    assert.equal(comboDefault.ok, true);
+
+    const summary = await runtime.getStudioSummary();
+    const soloPreset = summary.studio.published_presets.find((preset) => preset.preset_id === "sparksolo_coder" && preset.published_revision === 1);
+    const comboPreset = summary.studio.published_presets.find((preset) => preset.preset_id === "sparkcombo_coder" && preset.published_revision === 1);
+    const soloIndex = summary.studio.published_presets.findIndex((preset) => preset.preset_id === "sparksolo_coder" && preset.published_revision === 1);
+    const comboIndex = summary.studio.published_presets.findIndex((preset) => preset.preset_id === "sparkcombo_coder" && preset.published_revision === 1);
+
+    assert.equal(summary.ok, true);
+    assert.equal(summary.studio.defaults.solo?.preset_id, "sparksolo_coder");
+    assert.equal(summary.studio.defaults.solo?.valid, true);
+    assert.equal(summary.studio.defaults.combo?.preset_id, "sparkcombo_coder");
+    assert.equal(summary.studio.defaults.combo?.valid, true);
+    assert.ok(summary.studio.recommendations.solo);
+    assert.ok(summary.studio.recommendations.combo);
+    assert.equal(summary.studio.evidence_stale, false);
+    assert.equal(soloPreset?.evidence_status, "compatible");
+    assert.equal(comboPreset?.evidence_status, "compatible");
+    assert.ok(soloIndex >= 0);
+    assert.ok(comboIndex >= 0);
+    assert.ok(soloIndex < comboIndex);
+    assert.equal(soloPreset?.catalog_rank, soloIndex + 1);
+    assert.equal(comboPreset?.catalog_rank, comboIndex + 1);
+    assert.equal(typeof soloPreset?.bakeoff_rank, "number");
+    assert.equal(typeof comboPreset?.bakeoff_rank, "number");
+    assert.ok(soloPreset.bakeoff_rank < comboPreset.bakeoff_rank);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("studio summary builds canonical catalog shelves and candidate rows", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    await writeFile(
+      path.join(fixture.repoRoot, "workspace", "bakeoff_results.json"),
+      `${JSON.stringify([
+        {
+          model: "Qwen3-Next-80B-A3B-Instruct-Q4_K_M (GGUF)",
+          engine: "llama.cpp",
+          spinup_seconds: 52,
+          tokens_per_second: 28.67,
+          quality_score: "9/10",
+          quality_notes: "current shelf winner",
+          file: "qwen3_next_80b_gguf.json",
+        },
+        {
+          model: "GPT-OSS-120B-Q4_K_M (GGUF)",
+          engine: "llama.cpp",
+          spinup_seconds: 41,
+          tokens_per_second: 36.11,
+          quality_score: "8/10",
+          quality_notes: "candidate runtime beats TRT",
+          file: "gptoss120b_gguf.json",
+        },
+        {
+          model: "Qwen3.6-35B-A3B-UD-Q4_K_M (GGUF)",
+          engine: "llama.cpp",
+          spinup_seconds: 26,
+          tokens_per_second: 32.44,
+          quality_score: "8/10",
+          quality_notes: "promote next",
+          file: "qwen36_35b_gguf.json",
+        },
+        {
+          model: "Gemma-4-31B-it-Q4_K_M (GGUF)",
+          engine: "llama.cpp",
+          spinup_seconds: 22,
+          tokens_per_second: 7.99,
+          quality_score: "8/10",
+          quality_notes: "gguf beats trt for gemma",
+          file: "gemma4_31b_gguf.json",
+        },
+      ], null, 2)}\n`,
+      "utf-8",
+    );
+
+    const runtime = createRuntime({ repoRoot: fixture.repoRoot });
+    const summary = await runtime.getStudioSummary();
+    const catalog = summary.studio.catalog;
+    const qwenCombo = catalog.rows.find((row) => row.catalog_entry_id === "qwen80next__gemma431");
+    const gemmaSolo = catalog.rows.find((row) => row.catalog_entry_id === "gemma431");
+    const gptSolo = catalog.rows.find((row) => row.catalog_entry_id === "gptoss120");
+    const qwen36Solo = catalog.shelves.promote_next.solos.find((row) => row.catalog_entry_id === "qwen36");
+
+    assert.equal(summary.ok, true);
+    assert.ok(catalog);
+    assert.ok(qwenCombo);
+    assert.ok(gemmaSolo);
+    assert.ok(gptSolo);
+    assert.ok(qwen36Solo);
+
+    assert.deepEqual(qwenCombo.aliases, ["gamenator_qwen"]);
+    assert.equal(qwenCombo.publication_state, "current_published");
+    assert.equal(qwenCombo.catalog_shelf, "current");
+    assert.equal(qwenCombo.activation_target_id, "qwen80next-gemma431mini");
+
+    assert.equal(gemmaSolo.primary_variant.variant_id, "gguf");
+    assert.equal(gemmaSolo.publication_state, "current_published");
+    assert.equal(gemmaSolo.catalog_shelf, "current");
+
+    assert.equal(gptSolo.publication_state, "current_published");
+    assert.equal(gptSolo.recommendation_state, "promote_next");
+    assert.ok(gptSolo.candidate_variant_count >= 1);
+    assert.equal(gptSolo.primary_variant.variant_id, "gguf");
+    assert.equal(gptSolo.activation_target_id, "gptoss120");
+
+    assert.equal(qwen36Solo.publication_state, "candidate");
+    assert.equal(qwen36Solo.catalog_shelf, "promote_next");
+    assert.equal(qwen36Solo.activatable, false);
+    assert.equal(qwen36Solo.primary_variant.variant_id, "gguf");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("studio publish creates immutable revisions and apply reuses activate-set", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    const commands = [];
+    let largeProbeCount = 0;
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          if (isWorkerContainerInspection(command)) {
+            return { ok: true, stdout: "", stderr: "" };
+          }
+          commands.push(command);
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: async (baseUrl) => {
+          if (baseUrl === "http://127.0.0.1:8000") {
+            largeProbeCount += 1;
+            return largeProbeCount >= 2
+              ? { up: true, model_ids: ["Qwen3-Coder-Next-Q4_K_M.gguf"], raw: {} }
+              : { up: false, model_ids: [], raw: null };
+          }
+          return { up: false, model_ids: [], raw: null };
+        },
+        sleep: async () => {},
+        uuid: () => "job-studio-apply",
+      },
+    });
+
+    const firstSave = await runtime.saveStudioDraft({
+      draftId: "draft-immut",
+      presetId: "immut_coder",
+      displayName: "Immut Coder",
+      laneTargets: { large: "gguf_coder_next_large", mini: null },
+    });
+    assert.equal(firstSave.ok, true);
+
+    const firstPublish = await runtime.publishStudioDraft({
+      draftId: "draft-immut",
+      expectedDraftRevision: firstSave.draft.draft_revision,
+      persist: true,
+    });
+    assert.equal(firstPublish.ok, true);
+    assert.equal(firstPublish.published_revision, 1);
+
+    const secondSave = await runtime.saveStudioDraft({
+      draftId: "draft-immut",
+      expectedDraftRevision: firstSave.draft.draft_revision,
+      presetId: "immut_coder",
+      displayName: "Immut Coder",
+      description: "Second cut",
+      laneTargets: { large: "gguf_coder_next_large", mini: null },
+    });
+    assert.equal(secondSave.ok, true);
+    assert.equal(secondSave.draft.draft_revision, 2);
+
+    const secondPublish = await runtime.publishStudioDraft({
+      draftId: "draft-immut",
+      expectedDraftRevision: secondSave.draft.draft_revision,
+      persist: true,
+    });
+    assert.equal(secondPublish.ok, true);
+    assert.equal(secondPublish.published_revision, 2);
+
+    const catalog = await runtime.getActivationSets();
+    assert.ok(catalog.activation_sets.some((set) => set.set_id === firstPublish.activation_set_id));
+    assert.ok(catalog.activation_sets.some((set) => set.set_id === secondPublish.activation_set_id));
+
+    const applied = await runtime.applyStudioPreset({
+      presetId: "immut_coder",
+      publishedRevision: 1,
+      wait: true,
+    });
+    assert.equal(applied.ok, true);
+    assert.equal(applied.status, "ready");
+    assert.equal(applied.activation_set_id, firstPublish.activation_set_id);
+
+    const current = await runtime.getCurrent();
+    assert.equal(current.desired_state.active_set_id, firstPublish.activation_set_id);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 trackedTest("http routes expose the controller contract", async () => {
   const calls = [];
   const fakeRuntime = {
@@ -595,6 +980,42 @@ trackedTest("http routes expose the controller contract", async () => {
     async listModels() {
       calls.push(["listModels"]);
       return { ok: true, endpoint: "models" };
+    },
+    async getStudioSummary() {
+      calls.push(["getStudioSummary"]);
+      return { ok: true, studio: true };
+    },
+    async getStudioActionLog(limit) {
+      calls.push(["getStudioActionLog", limit]);
+      return { ok: true, entries: [] };
+    },
+    async saveStudioDraft(payload) {
+      calls.push(["saveStudioDraft", payload]);
+      return { ok: true, accepted: true, draft: { draft_id: payload.draftId || "draft-1" } };
+    },
+    async duplicateStudioDraft(payload) {
+      calls.push(["duplicateStudioDraft", payload]);
+      return { ok: true, accepted: true, draft: { draft_id: "draft-copy" } };
+    },
+    async deleteStudioDraft(payload) {
+      calls.push(["deleteStudioDraft", payload]);
+      return { ok: true, accepted: true, deleted: payload.draftId };
+    },
+    async publishStudioDraft(payload) {
+      calls.push(["publishStudioDraft", payload]);
+      return { ok: true, accepted: true, activation_set_id: "studio_r0001" };
+    },
+    async applyStudioPreset(payload) {
+      calls.push(["applyStudioPreset", payload]);
+      return { ok: true, accepted: true, activation_set_id: "studio_r0001" };
+    },
+    async setStudioDefault(payload) {
+      calls.push(["setStudioDefault", payload]);
+      return { ok: true, accepted: true, mode: payload.mode };
+    },
+    async refreshStudioEvidence() {
+      calls.push(["refreshStudioEvidence"]);
+      return { ok: true, stale: false };
     },
     async activate(payload) {
       calls.push(["activate", payload]);
@@ -645,6 +1066,10 @@ trackedTest("http routes expose the controller contract", async () => {
     assert.equal(current.status, 200);
     const models = await fetch(`${server.baseUrl}/api/llm-host/models`);
     assert.equal(models.status, 200);
+    const studioSummary = await fetch(`${server.baseUrl}/api/llm-host/studio/summary`);
+    assert.equal(studioSummary.status, 200);
+    const studioLog = await fetch(`${server.baseUrl}/api/llm-host/studio/action-log?limit=9`);
+    assert.equal(studioLog.status, 200);
 
     const activate = await fetch(`${server.baseUrl}/api/llm-host/activate`, {
       method: "POST",
@@ -680,6 +1105,53 @@ trackedTest("http routes expose the controller contract", async () => {
     assert.equal(fleetDown.status, 202);
     const snapshot = await fetch(`${server.baseUrl}/api/llm-host/snapshot`, { method: "POST" });
     assert.equal(snapshot.status, 200);
+    const saveDraft = await fetch(`${server.baseUrl}/api/llm-host/studio/drafts/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        draft_id: "draft-1",
+        preset_id: "sparksolo",
+        display_name: "Sparksolo",
+        lane_targets: { large: "gguf_coder_next_large", mini: null },
+      }),
+    });
+    assert.equal(saveDraft.status, 200);
+    const duplicateDraft = await fetch(`${server.baseUrl}/api/llm-host/studio/drafts/duplicate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draft_id: "draft-1" }),
+    });
+    assert.equal(duplicateDraft.status, 200);
+    const publishDraft = await fetch(`${server.baseUrl}/api/llm-host/studio/drafts/publish`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draft_id: "draft-1", draft_revision: 3 }),
+    });
+    assert.equal(publishDraft.status, 201);
+    const applyPreset = await fetch(`${server.baseUrl}/api/llm-host/studio/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preset_id: "sparksolo", published_revision: 1, wait: true }),
+    });
+    assert.equal(applyPreset.status, 202);
+    const setDefault = await fetch(`${server.baseUrl}/api/llm-host/studio/defaults/set`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "solo", preset_id: "sparksolo", published_revision: 1 }),
+    });
+    assert.equal(setDefault.status, 200);
+    const refreshEvidence = await fetch(`${server.baseUrl}/api/llm-host/studio/recommendations/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(refreshEvidence.status, 200);
+    const deleteDraft = await fetch(`${server.baseUrl}/api/llm-host/studio/drafts/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draft_id: "draft-1", draft_revision: 3 }),
+    });
+    assert.equal(deleteDraft.status, 200);
 
     assert.deepEqual(calls.find((entry) => entry[0] === "activate")?.[1], {
       profileId: "foo",
@@ -688,6 +1160,31 @@ trackedTest("http routes expose the controller contract", async () => {
       allowPreempt: false,
       dryRun: false,
       override: false,
+    });
+    assert.deepEqual(calls.find((entry) => entry[0] === "saveStudioDraft")?.[1], {
+      draftId: "draft-1",
+      expectedDraftRevision: null,
+      presetId: "sparksolo",
+      displayName: "Sparksolo",
+      description: "",
+      laneTargets: { large: "gguf_coder_next_large", mini: null },
+      sourceActivationSetId: "",
+      basePublishedRevision: null,
+    });
+    assert.deepEqual(calls.find((entry) => entry[0] === "getStudioActionLog"), ["getStudioActionLog", 9]);
+    assert.deepEqual(calls.find((entry) => entry[0] === "publishStudioDraft")?.[1], {
+      draftId: "draft-1",
+      expectedDraftRevision: 3,
+      persist: true,
+    });
+    assert.deepEqual(calls.find((entry) => entry[0] === "applyStudioPreset")?.[1], {
+      presetId: "sparksolo",
+      publishedRevision: 1,
+      activationSetId: "",
+      wait: true,
+      allowPreempt: true,
+      force: false,
+      dryRun: false,
     });
   } finally {
     await server.close();

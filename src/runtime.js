@@ -1,7 +1,8 @@
 // @ts-check
 import { exec as execCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile, mkdir, rename, copyFile, appendFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir, open, rename, rm as rmFile, copyFile, appendFile, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { logger } from "./logger.js";
@@ -64,6 +65,40 @@ async function writeJson(filePath, payload) {
   await mkdir(dir, { recursive: true });
   await writeFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
   await rename(tmpPath, filePath);
+}
+
+/**
+ * Acquire an advisory lock on filePath using O_EXCL (atomic create).
+ * Stale locks older than 5s are removed automatically.
+ * Returns fn() result; always releases lock even on error.
+ */
+async function withDesiredStateLock(lockPath, fn) {
+  const LOCK_TIMEOUT_MS = 5000;
+  const RETRY_INTERVAL_MS = 50;
+  const MAX_RETRIES = 20;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const fh = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY);
+      await fh.writeFile(String(process.pid));
+      await fh.close();
+      try {
+        return await fn();
+      } finally {
+        await rmFile(lockPath, { force: true });
+      }
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      try {
+        const s = await stat(lockPath);
+        if (Date.now() - s.mtimeMs > LOCK_TIMEOUT_MS) {
+          await rmFile(lockPath, { force: true });
+          continue;
+        }
+      } catch { /* disappeared */ }
+      if (attempt < MAX_RETRIES) await new Promise((r) => setTimeout(r, RETRY_INTERVAL_MS));
+    }
+  }
+  return fn(); // timed out — proceed anyway; atomic rename still protects integrity
 }
 
 /** Append a completed job to the JSONL history file. */
@@ -184,6 +219,12 @@ export function createRuntime({
   const activeManagedSlotPath = paths.activeManagedSlotPath || path.join(jobsStateRoot, "active_slot.json");
   const jobHistoryPath = paths.jobHistoryPath || path.join(stateRoot, "job_history.jsonl");
   const auditLogPath = paths.auditLogPath || path.join(stateRoot, "activation_audit.jsonl");
+  const studioRoot = paths.studioRoot || path.join(repoRoot, "workspace", "studio");
+  const studioDraftsPath = paths.studioDraftsPath || path.join(studioRoot, "drafts.json");
+  const studioDefaultsPath = paths.studioDefaultsPath || path.join(studioRoot, "defaults.json");
+  const studioEvidencePath = paths.studioEvidencePath || path.join(studioRoot, "bakeoff_evidence.json");
+  const studioActionLogPath = paths.studioActionLogPath || path.join(studioRoot, "action_log.jsonl");
+  const externalBakeoffScoreboardPath = paths.externalBakeoffScoreboardPath || "/home/admin/bakeoff_answers/bakeoff_scoreboard.json";
   const webhookUrl = process.env.LLMCOMMUNE_WEBHOOK_URL || "";
   const jobTtlMs = Number(process.env.LLMCOMMUNE_JOB_TTL_MS || 3600000);
   const jobs = new Map();
@@ -197,6 +238,8 @@ export function createRuntime({
   let _activating = false;
   let _activatingSetId = "";
   let _activatingStartMs = 0;
+  const ACTIVATION_COOLDOWN_MS = 30000; // 30s minimum between completed activations
+  let _lastActivationCompletedMs = 0;
 
   /** @param {string} laneId @param {() => Promise<unknown>} fn */
   async function withLaneLock(laneId, fn) {
@@ -316,7 +359,13 @@ export function createRuntime({
     };
   }
 
+  const desiredStateLockPath = desiredStatePath + ".lock";
+
   async function saveDesiredState(nextState) {
+    return withDesiredStateLock(desiredStateLockPath, () => _saveDesiredStateImpl(nextState));
+  }
+
+  async function _saveDesiredStateImpl(nextState) {
     const payload = {
       ...defaultDesiredState(),
       ...(nextState || {}),
@@ -922,6 +971,8 @@ export function createRuntime({
       },
       mini_fleet: fleet,
       desired_state: desiredState,
+      activating: _activating,
+      activating_set_id: _activating ? _activatingSetId : null,
       watchdog: {
         service_unit: "llmcommune-watchdog.service",
         controller_service_unit: "llmcommune-controller.service",
@@ -1432,23 +1483,39 @@ export function createRuntime({
       };
     }
 
-    // Profile policy enforcement: block manual_only_restore unless override=true.
-    const policy = profilePolicy(config, profile.profile_id);
-    const supportStatus = String(policy?.support_status || profile?.support_status || "").toLowerCase();
-    if (["manual_only_restore", "reserved_alpha"].includes(supportStatus) && !override) {
-      return {
-        ...apiError(
-          ErrorCode.POLICY_BLOCKED,
-          `Profile '${profile.profile_id}' has support_status='${supportStatus}' and cannot be activated via the API without override=true.`,
-        ),
-        accepted: false,
-      };
-    }
-
     const current = await currentState();
-    const workerState = await workerClearState(config);
     const currentLane = current.lanes[selectedLane];
+    const otherLaneId = selectedLane === "large" ? "mini" : "large";
+    const currentOtherLane = current.lanes[otherLaneId];
+    const conflictingCurrent = [];
+    const preservingMatchingOtherLane = preserveOtherLane &&
+      currentOtherLane?.profile_id &&
+      currentOtherLane.up &&
+      String(currentOtherLane.profile_id) === String(otherLaneTarget || "");
+    if (currentLane?.up && currentLane?.profile_id && currentLane.profile_id !== profile.profile_id) {
+      conflictingCurrent.push(currentLane.profile_id);
+    }
+    if (currentOtherLane?.profile_id && currentOtherLane.up && !preservingMatchingOtherLane) {
+      conflictingCurrent.push(currentOtherLane.profile_id);
+    }
+    if (current.mini_fleet?.up) {
+      conflictingCurrent.push(current.mini_fleet.fleet_id || "mini_fleet");
+    }
     if (currentLane?.profile_id === profile.profile_id && currentLane?.up) {
+      if (!preserveOtherLane && conflictingCurrent.length > 0) {
+        if (!allowPreempt) {
+          return {
+            ...apiError(ErrorCode.LANE_OCCUPIED, `requested activation would preempt ${conflictingCurrent.join(", ")}`),
+            accepted: false,
+          };
+        }
+        if (current.mini_fleet?.up) {
+          await stopFleet({ preserveDesiredState: true });
+        }
+        if (currentOtherLane?.profile_id && currentOtherLane.up) {
+          await stopLane(otherLaneId, { preserveDesiredState: true });
+        }
+      }
       await persistLaneState(selectedLane, profile);
       await saveDesiredState({
         mode: "lane",
@@ -1471,21 +1538,19 @@ export function createRuntime({
         status_detail: "requested profile already active",
       };
     }
-    const currentOtherLane = selectedLane === "large" ? current.lanes?.mini : current.lanes?.large;
-    const conflictingCurrent = [];
-    const preservingMatchingOtherLane = preserveOtherLane &&
-      currentOtherLane?.profile_id &&
-      currentOtherLane.up &&
-      String(currentOtherLane.profile_id) === String(otherLaneTarget || "");
-    if (currentLane?.up && currentLane?.profile_id && currentLane.profile_id !== profile.profile_id) {
-      conflictingCurrent.push(currentLane.profile_id);
+    // Profile policy enforcement: block manual_only_restore unless override=true.
+    const policy = profilePolicy(config, profile.profile_id);
+    const supportStatus = String(policy?.support_status || profile?.support_status || "").toLowerCase();
+    if (["manual_only_restore", "reserved_alpha"].includes(supportStatus) && !override) {
+      return {
+        ...apiError(
+          ErrorCode.POLICY_BLOCKED,
+          `Profile '${profile.profile_id}' has support_status='${supportStatus}' and cannot be activated via the API without override=true.`,
+        ),
+        accepted: false,
+      };
     }
-    if (currentOtherLane?.profile_id && currentOtherLane.up && !preservingMatchingOtherLane) {
-      conflictingCurrent.push(currentOtherLane.profile_id);
-    }
-    if (current.mini_fleet?.up) {
-      conflictingCurrent.push(current.mini_fleet.fleet_id || "mini_fleet");
-    }
+    const workerState = await workerClearState(config);
     if (!allowPreempt && conflictingCurrent.length > 0) {
       return {
         ...apiError(ErrorCode.LANE_OCCUPIED, `requested activation would preempt ${conflictingCurrent.join(", ")}`),
@@ -1682,7 +1747,6 @@ export function createRuntime({
         estimated_ready_at: eta,
       };
     }
-
     const config = await loadValidatedConfig();
 
     // ── set_id format validation ─────────────────────────────────────────────
@@ -1716,6 +1780,21 @@ export function createRuntime({
             };
           }
         } catch { /* health check failed — proceed with full activation */ }
+      }
+    }
+
+    // Rate limit: 30s cooldown after last completed activation (skipped for same set)
+    if (!force && _lastActivationCompletedMs > 0) {
+      const sinceLast = Date.now() - _lastActivationCompletedMs;
+      if (sinceLast < ACTIVATION_COOLDOWN_MS) {
+        const eta = new Date(_lastActivationCompletedMs + ACTIVATION_COOLDOWN_MS).toISOString();
+        return {
+          ok: false,
+          accepted: false,
+          code: ErrorCode.RATE_LIMITED,
+          detail: `activation cooldown active — ${Math.ceil((ACTIVATION_COOLDOWN_MS - sinceLast) / 1000)}s remaining`,
+          estimated_ready_at: eta,
+        };
       }
     }
 
@@ -1880,6 +1959,7 @@ export function createRuntime({
           lane_targets: laneTargets,
           active_set_id: setId,
           schema_version: 2,
+          lane_dark_states: {},
           fleet_id: "",
           status_detail: largeProfileId && miniProfileId
             ? `${largeProfileId} ready on large + ${miniProfileId} ready on mini`
@@ -1902,6 +1982,7 @@ export function createRuntime({
       } finally {
         _activating = false;
         _activatingSetId = "";
+        _lastActivationCompletedMs = Date.now();
       }
     };
 
@@ -1947,25 +2028,1032 @@ export function createRuntime({
     const config = await loadValidatedConfig();
     const desired = await loadDesiredState();
     const activeSetId = String(desired.active_set_id || "");
+    const sets = allActivationSets(config).map((s) => ({
+      set_id: String(s.set_id || ""),
+      display_name: String(s.display_name || ""),
+      description: String(s.description || ""),
+      requires_dual_box: Boolean(s.requires_dual_box),
+      studio_preset_id: String(s.studio_preset_id || ""),
+      published_revision: studioRevisionForSet(s),
+      lane_targets: {
+        large: s.lane_targets?.large || null,
+        mini: s.lane_targets?.mini || null,
+      },
+      currently_active: String(s.set_id || "") === activeSetId,
+    }));
     return {
       ok: true,
-      sets: allActivationSets(config).map((s) => ({
-        set_id: String(s.set_id || ""),
-        display_name: String(s.display_name || ""),
-        description: String(s.description || ""),
-        requires_dual_box: Boolean(s.requires_dual_box),
-        lane_targets: {
-          large: s.lane_targets?.large || null,
-          mini: s.lane_targets?.mini || null,
-        },
-        currently_active: String(s.set_id || "") === activeSetId,
-      })),
+      sets,
+      activation_sets: sets,
       currently_active_set_id: activeSetId || null,
       total: allActivationSets(config).length,
     };
   }
 
   const MAX_SETS = 50;
+
+  function normalizeStudioText(value) {
+    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  }
+
+  function tokenizeStudioValues(values) {
+    const skip = new Set([
+      "and",
+      "the",
+      "for",
+      "lane",
+      "set",
+      "large",
+      "mini",
+      "single",
+      "dual",
+      "instruct",
+      "chat",
+      "files",
+      "models",
+      "runtime",
+      "profile",
+      "activation",
+    ]);
+    const tokens = new Set();
+    for (const value of values) {
+      for (const token of normalizeStudioText(value).split(/\s+/).filter(Boolean)) {
+        if (!skip.has(token)) {
+          tokens.add(token);
+        }
+      }
+    }
+    return [...tokens];
+  }
+
+  function sanitizeStudioId(value, fallback = "preset") {
+    const normalized = normalizeStudioText(value).replace(/\s+/g, "_").replace(/^_+|_+$/g, "");
+    const safe = normalized || fallback;
+    return safe.slice(0, 63);
+  }
+
+  function parsePublishedRevision(value, fallback = 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+  }
+
+  function studioModeForTargets(laneTargets) {
+    return laneTargets?.mini ? "combo" : "solo";
+  }
+
+  function cleanLaneTargets(laneTargets = {}) {
+    return {
+      large: String(laneTargets?.large || "").trim() || null,
+      mini: Object.prototype.hasOwnProperty.call(laneTargets || {}, "mini")
+        ? (String(laneTargets?.mini || "").trim() || null)
+        : null,
+    };
+  }
+
+  function formatPublishedStudioSetId(presetId, publishedRevision) {
+    const suffix = `_r${String(parsePublishedRevision(publishedRevision, 0)).padStart(4, "0")}`;
+    const safeBase = sanitizeStudioId(presetId, "preset");
+    return `${safeBase.slice(0, Math.max(1, 63 - suffix.length))}${suffix}`;
+  }
+
+  function validateActivationSetTargets(config, laneTargets) {
+    const cleaned = cleanLaneTargets(laneTargets);
+    const profileIds = new Set((config.profiles || []).map((profile) => String(profile.profile_id || "")));
+    if (cleaned.large && !profileIds.has(cleaned.large)) {
+      return {
+        ok: false,
+        error: { ...apiError(ErrorCode.PROFILE_NOT_FOUND, `unknown profile_id '${cleaned.large}' for lane_targets.large`), accepted: false },
+      };
+    }
+    if (cleaned.mini && !profileIds.has(cleaned.mini)) {
+      return {
+        ok: false,
+        error: { ...apiError(ErrorCode.PROFILE_NOT_FOUND, `unknown profile_id '${cleaned.mini}' for lane_targets.mini`), accepted: false },
+      };
+    }
+    if (!cleaned.large && !cleaned.mini) {
+      return {
+        ok: false,
+        error: { ...apiError(ErrorCode.INPUT_INVALID, "lane_targets must include at least one of large or mini"), accepted: false },
+      };
+    }
+    const largeProfile = cleaned.large ? profileById(config, cleaned.large) : null;
+    const miniProfile = cleaned.mini ? profileById(config, cleaned.mini) : null;
+    return {
+      ok: true,
+      lane_targets: cleaned,
+      large_profile: largeProfile,
+      mini_profile: miniProfile,
+      requires_dual_box: Boolean(largeProfile?.requires_both_boxes || miniProfile?.requires_both_boxes),
+    };
+  }
+
+  function defaultStudioDraftState() {
+    return {
+      version: 1,
+      updated_at: currentIso(),
+      drafts: [],
+    };
+  }
+
+  async function loadStudioDraftState() {
+    const loaded = await readJsonImpl(studioDraftsPath, defaultStudioDraftState());
+    return {
+      ...defaultStudioDraftState(),
+      ...loaded,
+      drafts: Array.isArray(loaded?.drafts) ? loaded.drafts : [],
+    };
+  }
+
+  async function saveStudioDraftState(nextState) {
+    const payload = {
+      version: 1,
+      updated_at: currentIso(),
+      drafts: Array.isArray(nextState?.drafts) ? nextState.drafts : [],
+    };
+    await writeJsonImpl(studioDraftsPath, payload);
+    return payload;
+  }
+
+  function defaultStudioDefaults() {
+    return {
+      version: 1,
+      updated_at: currentIso(),
+      solo: null,
+      combo: null,
+    };
+  }
+
+  async function loadStudioDefaults() {
+    const loaded = await readJsonImpl(studioDefaultsPath, defaultStudioDefaults());
+    return {
+      ...defaultStudioDefaults(),
+      ...loaded,
+    };
+  }
+
+  async function saveStudioDefaults(nextDefaults) {
+    const payload = {
+      version: 1,
+      updated_at: currentIso(),
+      solo: nextDefaults?.solo || null,
+      combo: nextDefaults?.combo || null,
+    };
+    await writeJsonImpl(studioDefaultsPath, payload);
+    return payload;
+  }
+
+  async function readJsonLines(filePath) {
+    try {
+      const raw = await readFile(filePath, "utf-8");
+      return raw
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  async function appendStudioActionLog(entry) {
+    await mkdir(path.dirname(studioActionLogPath), { recursive: true });
+    let rows = [];
+    try {
+      const raw = await readFile(studioActionLogPath, "utf-8");
+      rows = raw.split("\n").filter(Boolean);
+    } catch {}
+    rows.push(JSON.stringify({ ts: currentIso(), ...entry }));
+    if (rows.length > 200) {
+      rows = rows.slice(-200);
+    }
+    const tmp = studioActionLogPath + ".tmp";
+    await writeFile(tmp, rows.join("\n") + "\n", "utf-8");
+    await rename(tmp, studioActionLogPath);
+  }
+
+  async function readStudioActionLog(limit = 30) {
+    const entries = await readJsonLines(studioActionLogPath);
+    return entries.slice(-Math.max(1, limit));
+  }
+
+  function parseQualityScore(value) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    const match = String(value || "").match(/-?\d+(?:\.\d+)?/);
+    return match ? Number(match[0]) : null;
+  }
+
+  function normalizeScoreboardRows(payload) {
+    const rows = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.results)
+        ? payload.results
+        : Array.isArray(payload?.entries)
+          ? payload.entries
+          : [];
+    return rows
+      .map((row) => ({
+        model: String(row?.model || row?.name || "").trim(),
+        engine: String(row?.engine || row?.runtime || "").trim(),
+        file: String(row?.file || row?.source_file || "").trim(),
+        spinup_seconds: Number.isFinite(Number(row?.spinup_seconds)) ? Number(row.spinup_seconds) : null,
+        tokens_per_second: Number.isFinite(Number(row?.tokens_per_second)) ? Number(row.tokens_per_second) : null,
+        quality_score: parseQualityScore(row?.quality_score),
+        quality_label: String(row?.quality_score || "").trim(),
+        quality_notes: String(row?.quality_notes || "").trim(),
+      }))
+      .filter((row) => row.model || row.file);
+  }
+
+  async function loadStudioScoreboardSource() {
+    const candidates = [
+      path.join(repoRoot, "workspace", "bakeoff_results.json"),
+      externalBakeoffScoreboardPath,
+    ];
+    const sources = [];
+    let selectedPath = null;
+    let rows = [];
+    for (const candidate of candidates) {
+      try {
+        const meta = await stat(candidate);
+        sources.push({
+          path: candidate,
+          present: true,
+          mtime: new Date(meta.mtimeMs).toISOString(),
+          mtime_ms: meta.mtimeMs,
+          size_bytes: meta.size,
+        });
+        const normalized = normalizeScoreboardRows(await readJsonImpl(candidate, null));
+        if (!selectedPath && normalized.length > 0) {
+          selectedPath = candidate;
+          rows = normalized;
+        }
+      } catch {
+        sources.push({ path: candidate, present: false, mtime_ms: 0, size_bytes: 0 });
+      }
+    }
+    return { selected_path: selectedPath, rows, sources };
+  }
+
+  function studioSourceSignature(sources) {
+    return JSON.stringify((sources || []).map((source) => [
+      source.path,
+      Boolean(source.present),
+      Number(source.mtime_ms || 0),
+      Number(source.size_bytes || 0),
+    ]));
+  }
+
+  function studioPresetIdForSet(set) {
+    return String(set?.studio_preset_id || set?.set_id || "").trim();
+  }
+
+  function studioRevisionForSet(set) {
+    return Object.prototype.hasOwnProperty.call(set || {}, "published_revision")
+      ? parsePublishedRevision(set?.published_revision, 0)
+      : 0;
+  }
+
+  function studioEvidenceKey(presetId, publishedRevision) {
+    return `${String(presetId || "").trim()}#${parsePublishedRevision(publishedRevision, 0)}`;
+  }
+
+  function scoreStudioEvidenceMatch(setRecord, largeProfile, row) {
+    const targetTokens = tokenizeStudioValues([
+      largeProfile?.display_name,
+      largeProfile?.model_id,
+      largeProfile?.profile_id,
+      setRecord?.display_name,
+      setRecord?.description,
+      setRecord?.set_id,
+    ]);
+    const rowTokens = new Set(tokenizeStudioValues([
+      row?.model,
+      row?.file,
+      row?.engine,
+    ]));
+    let score = 0;
+    for (const token of targetTokens) {
+      if (rowTokens.has(token)) {
+        score += 1;
+      }
+    }
+    const profileIdToken = normalizeStudioText(largeProfile?.profile_id || "").replace(/\s+/g, "");
+    const rowFileToken = normalizeStudioText(row?.file || "").replace(/\s+/g, "");
+    if (profileIdToken && rowFileToken.includes(profileIdToken)) {
+      score += 2;
+    }
+    const modelIdToken = normalizeStudioText(largeProfile?.model_id || "");
+    const rowModelToken = normalizeStudioText(row?.model || "");
+    if (modelIdToken && rowModelToken && (rowModelToken.includes(modelIdToken) || modelIdToken.includes(rowModelToken))) {
+      score += 2;
+    }
+    return score;
+  }
+
+  function evidenceCompatibility(runtimeFamily, engine) {
+    const runtimeTokens = new Set(tokenizeStudioValues([runtimeFamily]));
+    const engineTokens = new Set(tokenizeStudioValues([engine]));
+    if (runtimeTokens.has("llama") && runtimeTokens.has("cpp") && engineTokens.has("llama") && engineTokens.has("cpp")) {
+      return "compatible";
+    }
+    if ((runtimeTokens.has("trt") || runtimeTokens.has("trtllm") || runtimeTokens.has("tensorrt")) &&
+      (engineTokens.has("trt") || engineTokens.has("trtllm") || engineTokens.has("tensorrt"))) {
+      return "compatible";
+    }
+    if (runtimeTokens.has("nim") && engineTokens.has("nim")) {
+      return "compatible";
+    }
+    if (runtimeTokens.has("ollama") && engineTokens.has("ollama")) {
+      return "compatible";
+    }
+    return engineTokens.size > 0 ? "mismatched" : "unknown";
+  }
+
+  function buildStudioEvidenceEntries(config, scoreboardRows, selectedPath) {
+    return allActivationSets(config).map((set) => {
+      const laneTargets = cleanLaneTargets(set?.lane_targets);
+      const largeProfile = laneTargets.large ? profileById(config, laneTargets.large) : null;
+      const ranked = largeProfile
+        ? scoreboardRows
+          .map((row) => ({ row, score: scoreStudioEvidenceMatch(set, largeProfile, row) }))
+          .filter((entry) => entry.score >= 2)
+          .sort((left, right) => right.score - left.score)
+        : [];
+      const best = ranked[0] || null;
+      const compatibility = best ? evidenceCompatibility(largeProfile?.runtime_family, best.row?.engine) : "unknown";
+      return {
+        preset_id: studioPresetIdForSet(set),
+        published_revision: studioRevisionForSet(set),
+        activation_set_id: String(set?.set_id || ""),
+        mode: studioModeForTargets(laneTargets),
+        large_profile_id: largeProfile?.profile_id || null,
+        large_model_id: largeProfile?.model_id || null,
+        large_runtime_family: largeProfile?.runtime_family || null,
+        evidence_status: best ? compatibility : "unknown",
+        matched_score: best?.score || 0,
+        matched_model: best?.row?.model || null,
+        matched_engine: best?.row?.engine || null,
+        matched_file: best?.row?.file || null,
+        spinup_seconds: best?.row?.spinup_seconds ?? null,
+        tokens_per_second: best?.row?.tokens_per_second ?? null,
+        quality_score: best?.row?.quality_score ?? null,
+        quality_label: best?.row?.quality_label || "",
+        quality_notes: best?.row?.quality_notes || "",
+        evidence_source_path: selectedPath || null,
+      };
+    });
+  }
+
+  function buildStudioRecommendations(evidenceEntries, stale = false) {
+    if (stale) {
+      return {
+        solo: null,
+        combo: null,
+        stale: true,
+        detail: "Bakeoff evidence source unavailable; recommendations suppressed.",
+      };
+    }
+    const pick = (mode) => {
+      const candidates = evidenceEntries
+        .filter((entry) => entry.mode === mode && entry.evidence_status === "compatible" && entry.quality_score !== null)
+        .sort((left, right) =>
+          (right.quality_score || 0) - (left.quality_score || 0) ||
+          (right.tokens_per_second || 0) - (left.tokens_per_second || 0) ||
+          (left.spinup_seconds || Number.POSITIVE_INFINITY) - (right.spinup_seconds || Number.POSITIVE_INFINITY));
+      const top = candidates[0];
+      if (!top) {
+        return null;
+      }
+      return {
+        preset_id: top.preset_id,
+        published_revision: top.published_revision,
+        activation_set_id: top.activation_set_id,
+        mode,
+        quality_score: top.quality_score,
+        quality_label: top.quality_label,
+        tokens_per_second: top.tokens_per_second,
+        spinup_seconds: top.spinup_seconds,
+        rationale: `Best compatible bakeoff quality (${top.quality_label || top.quality_score}) with ${top.tokens_per_second ?? "?"} tok/s throughput.`,
+      };
+    };
+    return {
+      solo: pick("solo"),
+      combo: pick("combo"),
+      stale: false,
+    };
+  }
+
+  function studioCatalogMetric(preset, field) {
+    const value = preset?.evidence?.[field];
+    return Number.isFinite(Number(value)) ? Number(value) : null;
+  }
+
+  function studioEvidenceStatusRank(status) {
+    switch (String(status || "").trim().toLowerCase()) {
+      case "compatible":
+        return 4;
+      case "mismatched":
+        return 3;
+      case "stale":
+        return 2;
+      default:
+        return 1;
+    }
+  }
+
+  function compareStudioCatalogPresets(left, right) {
+    return (right.latest_for_preset ? 1 : 0) - (left.latest_for_preset ? 1 : 0) ||
+      studioEvidenceStatusRank(right.evidence_status) - studioEvidenceStatusRank(left.evidence_status) ||
+      ((studioCatalogMetric(right, "quality_score") ?? Number.NEGATIVE_INFINITY) -
+        (studioCatalogMetric(left, "quality_score") ?? Number.NEGATIVE_INFINITY)) ||
+      ((studioCatalogMetric(right, "tokens_per_second") ?? Number.NEGATIVE_INFINITY) -
+        (studioCatalogMetric(left, "tokens_per_second") ?? Number.NEGATIVE_INFINITY)) ||
+      ((studioCatalogMetric(left, "spinup_seconds") ?? Number.POSITIVE_INFINITY) -
+        (studioCatalogMetric(right, "spinup_seconds") ?? Number.POSITIVE_INFINITY)) ||
+      ((studioCatalogMetric(right, "matched_score") ?? Number.NEGATIVE_INFINITY) -
+        (studioCatalogMetric(left, "matched_score") ?? Number.NEGATIVE_INFINITY)) ||
+      (right.recommended ? 1 : 0) - (left.recommended ? 1 : 0) ||
+      (right.default_selected ? 1 : 0) - (left.default_selected ? 1 : 0) ||
+      (right.currently_active ? 1 : 0) - (left.currently_active ? 1 : 0) ||
+      left.preset_id.localeCompare(right.preset_id) ||
+      right.published_revision - left.published_revision;
+  }
+
+  function annotateStudioCatalogPresets(presets) {
+    let nextBakeoffRank = 0;
+    return presets
+      .slice()
+      .sort(compareStudioCatalogPresets)
+      .map((preset, index) => {
+        const hasBakeoffSignal = preset.evidence_status !== "unknown" &&
+          (studioCatalogMetric(preset, "quality_score") !== null ||
+            studioCatalogMetric(preset, "tokens_per_second") !== null ||
+            studioCatalogMetric(preset, "matched_score") !== null ||
+            String(preset?.evidence?.matched_model || "").trim().length > 0);
+        if (hasBakeoffSignal) {
+          nextBakeoffRank += 1;
+        }
+        return {
+          ...preset,
+          catalog_rank: index + 1,
+          bakeoff_rank: hasBakeoffSignal ? nextBakeoffRank : null,
+        };
+      });
+  }
+
+  const CATALOG_FAMILY_META = Object.freeze({
+    qwen80next: { display_name: "Qwen3 Next 80B" },
+    qwen80nextcoder: { display_name: "CoderNext" },
+    gemma431: { display_name: "Gemma 4 31B" },
+    gptoss120: { display_name: "GPT-OSS 120B" },
+    gptoss20: { display_name: "GPT-OSS 20B" },
+    qwen36: { display_name: "Qwen3.6 35B" },
+    "qwen35-122b": { display_name: "Qwen3.5 122B" },
+    "minimax-m27": { display_name: "MiniMax M2.7" },
+    qwen235: { display_name: "Qwen3 235B" },
+    llama370: { display_name: "Llama 3.3 70B" },
+    nemotron120: { display_name: "Nemotron 3 Super 120B" },
+    gemma431mini: { display_name: "Gemma 4 31B Reviewer" },
+    qwen30mini: { display_name: "Qwen3 30B Mini" },
+    qwen32mini: { display_name: "Qwen3 32B Mini" },
+    deepseek32mini: { display_name: "DeepSeek 32B Mini" },
+  });
+
+  const LEGACY_CATALOG_ALIASES = Object.freeze(new Set([
+    "gamenator_qwen",
+    "gamenator_gpt",
+    "inferno",
+  ]));
+
+  const CANDIDATE_COMBO_SPECS = Object.freeze([
+    { family_id: "qwen36", mini_family_id: "gemma431mini", recommendation_state: "promote_next" },
+    { family_id: "gptoss120", mini_family_id: "gemma431mini", recommendation_state: "promote_next" },
+    { family_id: "qwen35-122b", mini_family_id: "gemma431mini", recommendation_state: "available_bench" },
+  ]);
+
+  function catalogFamilyDisplayName(familyId) {
+    return CATALOG_FAMILY_META[familyId]?.display_name || String(familyId || "").trim() || "Unknown";
+  }
+
+  function catalogRuntimeVariantId(runtimeFamily) {
+    const lowered = normalizeStudioText(runtimeFamily || "").replace(/\s+/g, "");
+    if (lowered.includes("llama") && lowered.includes("cpp")) return "gguf";
+    if (lowered.includes("trt")) return "trt";
+    if (lowered.includes("vllm")) return "vllm";
+    if (lowered.includes("nim")) return "nim";
+    if (lowered.includes("ollama")) return "ollama";
+    return lowered || "unknown";
+  }
+
+  function catalogRecommendationRank(state) {
+    switch (String(state || "").trim().toLowerCase()) {
+      case "promote_next":
+        return 3;
+      case "available_bench":
+        return 2;
+      default:
+        return 1;
+    }
+  }
+
+  function catalogPublicationRank(state) {
+    switch (String(state || "").trim().toLowerCase()) {
+      case "current_published":
+        return 2;
+      case "candidate":
+        return 1;
+      default:
+        return 0;
+    }
+  }
+
+  function catalogFamilyIdFromValues(...values) {
+    const blob = normalizeStudioText(values.filter(Boolean).join(" ")).replace(/\s+/g, "");
+    if (!blob) return "";
+    if (blob.includes("qwen3codernext") || blob.includes("codernext")) return "qwen80nextcoder";
+    if (blob.includes("qwen3next80b") || blob.includes("qwen3next80ba3b") || blob.includes("qwen80next")) return "qwen80next";
+    if (blob.includes("qwen3.635b") || blob.includes("qwen3635b") || blob.includes("qwen36_35b")) return "qwen36";
+    if (blob.includes("qwen3.5122b") || blob.includes("qwen35122b") || blob.includes("qwen35_122b")) return "qwen35-122b";
+    if (blob.includes("qwen323bnvfp4") || blob.includes("qwen332bnvfp4") || blob.includes("qwen32mini")) return "qwen32mini";
+    if (blob.includes("qwen330ba3b") || blob.includes("qwen30mini")) return "qwen30mini";
+    if (blob.includes("qwen3235b") || blob.includes("qwen235")) return "qwen235";
+    if (blob.includes("gptoss120b")) return "gptoss120";
+    if (blob.includes("gptoss20b")) return "gptoss20";
+    if (blob.includes("gemma431b")) return "gemma431";
+    if (blob.includes("deepseekr132b") || blob.includes("deepseek32")) return "deepseek32mini";
+    if (blob.includes("llama3.370b") || blob.includes("llama3370b") || blob.includes("llama370")) return "llama370";
+    if (blob.includes("nemotron3super120b") || blob.includes("nemotron120")) return "nemotron120";
+    if (blob.includes("minimaxm2.7") || blob.includes("minimaxm27")) return "minimax-m27";
+    return "";
+  }
+
+  function catalogEntryTypeForMiniFamily(miniFamilyId) {
+    return miniFamilyId ? "combo" : "solo";
+  }
+
+  function catalogEntryIdForFamilies(familyId, miniFamilyId = "") {
+    return miniFamilyId ? `${familyId}__${miniFamilyId}` : familyId;
+  }
+
+  function catalogActivationTargetToken(familyId, lane = "large") {
+    if (lane === "mini" && familyId === "gemma431") return "gemma431mini";
+    return familyId;
+  }
+
+  function catalogGeneratedActivationTargetId(familyId, miniFamilyId = "") {
+    const largeToken = catalogActivationTargetToken(familyId, "large");
+    if (!miniFamilyId) return largeToken;
+    return `${largeToken}-${catalogActivationTargetToken(miniFamilyId, "mini")}`;
+  }
+
+  function catalogEntryDisplayName(familyId, miniFamilyId = "") {
+    const family = catalogFamilyDisplayName(familyId);
+    if (!miniFamilyId) return family;
+    return `${family} + ${catalogFamilyDisplayName(miniFamilyId)}`;
+  }
+
+  function catalogVariantSort(left, right) {
+    return studioEvidenceStatusRank(right.evidence_status) - studioEvidenceStatusRank(left.evidence_status) ||
+      ((right.quality_score ?? Number.NEGATIVE_INFINITY) - (left.quality_score ?? Number.NEGATIVE_INFINITY)) ||
+      ((right.tokens_per_second ?? Number.NEGATIVE_INFINITY) - (left.tokens_per_second ?? Number.NEGATIVE_INFINITY)) ||
+      ((left.spinup_seconds ?? Number.POSITIVE_INFINITY) - (right.spinup_seconds ?? Number.POSITIVE_INFINITY)) ||
+      catalogRecommendationRank(right.recommendation_state) - catalogRecommendationRank(left.recommendation_state) ||
+      catalogPublicationRank(right.publication_state) - catalogPublicationRank(left.publication_state) ||
+      String(left.variant_id || "").localeCompare(String(right.variant_id || "")) ||
+      String(left.activation_target_id || left.variant_display_name || "").localeCompare(String(right.activation_target_id || right.variant_display_name || ""));
+  }
+
+  function catalogRowSort(left, right) {
+    const shelfOrder = { current: 3, promote_next: 2, available_bench: 1 };
+    return (shelfOrder[right.catalog_shelf] || 0) - (shelfOrder[left.catalog_shelf] || 0) ||
+      (studioEvidenceStatusRank(right.evidence_status) - studioEvidenceStatusRank(left.evidence_status)) ||
+      ((right.quality_score ?? Number.NEGATIVE_INFINITY) - (left.quality_score ?? Number.NEGATIVE_INFINITY)) ||
+      ((right.tokens_per_second ?? Number.NEGATIVE_INFINITY) - (left.tokens_per_second ?? Number.NEGATIVE_INFINITY)) ||
+      ((left.spinup_seconds ?? Number.POSITIVE_INFINITY) - (right.spinup_seconds ?? Number.POSITIVE_INFINITY)) ||
+      left.display_name.localeCompare(right.display_name) ||
+      left.catalog_entry_id.localeCompare(right.catalog_entry_id);
+  }
+
+  function mapCandidateRecommendationState(candidate) {
+    const action = String(candidate?.recommended_action || "").trim().toLowerCase();
+    if (action === "promote_next" || action === "promote_into_catalog") return "promote_next";
+    return "available_bench";
+  }
+
+  function scoreCandidateEvidenceMatch(candidate, row) {
+    if (candidate?.scoreboard_file && String(candidate.scoreboard_file).trim() === String(row?.file || "").trim()) {
+      return 100;
+    }
+    const targetTokens = tokenizeStudioValues([
+      candidate?.display_name,
+      candidate?.model_id,
+      candidate?.scoreboard_file,
+      candidate?.catalog_family_id,
+      candidate?.notes,
+    ]);
+    const rowTokens = new Set(tokenizeStudioValues([
+      row?.model,
+      row?.file,
+      row?.engine,
+    ]));
+    let score = 0;
+    for (const token of targetTokens) {
+      if (rowTokens.has(token)) score += 1;
+    }
+    return score;
+  }
+
+  function buildCatalogCandidateSources(config, scoreboardRows, selectedPath) {
+    const candidateModels = Array.isArray(config?.candidate_models) ? config.candidate_models : [];
+    const soloSources = candidateModels
+      .map((candidate) => {
+        const ranked = scoreboardRows
+          .map((row) => ({ row, score: scoreCandidateEvidenceMatch(candidate, row) }))
+          .filter((entry) => entry.score > 0)
+          .sort((left, right) => right.score - left.score);
+        const best = ranked[0] || null;
+        if (!best) return null;
+        const familyId = String(candidate?.catalog_family_id || catalogFamilyIdFromValues(candidate?.model_id, candidate?.display_name, candidate?.notes)).trim();
+        if (!familyId) return null;
+        const runtimeFamily = candidate?.preferred_runtime || best.row?.engine || "unknown";
+        return {
+          catalog_entry_id: catalogEntryIdForFamilies(familyId),
+          family_id: familyId,
+          mini_family_id: "",
+          entry_type: "solo",
+          publication_state: "candidate",
+          recommendation_state: mapCandidateRecommendationState(candidate),
+          activation_target_id: null,
+          alias_ids: [],
+          variant_id: catalogRuntimeVariantId(runtimeFamily),
+          variant_display_name: String(candidate?.display_name || catalogFamilyDisplayName(familyId)),
+          display_name: catalogEntryDisplayName(familyId),
+          runtime_family: runtimeFamily,
+          evidence_status: evidenceCompatibility(runtimeFamily, best.row?.engine),
+          matched_score: best.score,
+          matched_model: best.row?.model || null,
+          matched_engine: best.row?.engine || null,
+          matched_file: best.row?.file || null,
+          spinup_seconds: best.row?.spinup_seconds ?? null,
+          tokens_per_second: best.row?.tokens_per_second ?? null,
+          quality_score: best.row?.quality_score ?? null,
+          quality_label: best.row?.quality_label || "",
+          quality_notes: best.row?.quality_notes || "",
+          evidence_source_path: selectedPath || null,
+          default_selected: false,
+          recommended: false,
+          currently_active: false,
+          latest_for_preset: true,
+          draft_count: 0,
+          published_revision: null,
+          preset_id: familyId,
+        };
+      })
+      .filter(Boolean);
+    const soloByFamily = new Map(soloSources.map((entry) => [entry.family_id, entry]));
+    const comboSources = CANDIDATE_COMBO_SPECS
+      .map((spec) => {
+        const solo = soloByFamily.get(spec.family_id);
+        if (!solo) return null;
+        const familyId = spec.family_id;
+        const miniFamilyId = spec.mini_family_id;
+        return {
+          ...solo,
+          catalog_entry_id: catalogEntryIdForFamilies(familyId, miniFamilyId),
+          mini_family_id: miniFamilyId,
+          entry_type: "combo",
+          recommendation_state: spec.recommendation_state,
+          display_name: catalogEntryDisplayName(familyId, miniFamilyId),
+        };
+      })
+      .filter(Boolean);
+    return [...soloSources, ...comboSources];
+  }
+
+  function buildCatalogPublishedSources(config, publishedPresets, generatedTargetLookup = new Map()) {
+    return publishedPresets
+      .map((preset) => {
+        const laneTargets = cleanLaneTargets(preset?.lane_targets);
+        const largeProfile = laneTargets.large ? profileById(config, laneTargets.large) : null;
+        const miniProfile = laneTargets.mini ? profileById(config, laneTargets.mini) : null;
+        const familyId = catalogFamilyIdFromValues(
+          largeProfile?.model_id,
+          largeProfile?.display_name,
+          largeProfile?.profile_id,
+          preset?.display_name,
+          preset?.preset_id,
+        );
+        if (!familyId) return null;
+        const miniFamilyId = miniProfile
+          ? catalogFamilyIdFromValues(miniProfile?.model_id, miniProfile?.display_name, miniProfile?.profile_id)
+          : "";
+        const generatedTargetId = generatedTargetLookup.get(catalogEntryIdForFamilies(familyId, miniFamilyId))
+          || catalogGeneratedActivationTargetId(familyId, miniFamilyId);
+        const activationTargetId = String(preset?.activation_set_id || "");
+        return {
+          catalog_entry_id: catalogEntryIdForFamilies(familyId, miniFamilyId),
+          family_id: familyId,
+          mini_family_id: miniFamilyId,
+          entry_type: catalogEntryTypeForMiniFamily(miniFamilyId),
+          publication_state: "current_published",
+          recommendation_state: "current",
+          activation_target_id: activationTargetId,
+          alias_ids: LEGACY_CATALOG_ALIASES.has(activationTargetId) && activationTargetId !== generatedTargetId ? [activationTargetId] : [],
+          variant_id: catalogRuntimeVariantId(preset?.evidence?.large_runtime_family || largeProfile?.runtime_family),
+          variant_display_name: String(preset?.display_name || catalogEntryDisplayName(familyId, miniFamilyId)),
+          display_name: catalogEntryDisplayName(familyId, miniFamilyId),
+          runtime_family: preset?.evidence?.large_runtime_family || largeProfile?.runtime_family || null,
+          evidence_status: preset?.evidence_status || "unknown",
+          matched_score: preset?.evidence?.matched_score ?? null,
+          matched_model: preset?.evidence?.matched_model || null,
+          matched_engine: preset?.evidence?.matched_engine || null,
+          matched_file: preset?.evidence?.matched_file || null,
+          spinup_seconds: preset?.evidence?.spinup_seconds ?? null,
+          tokens_per_second: preset?.evidence?.tokens_per_second ?? null,
+          quality_score: preset?.evidence?.quality_score ?? null,
+          quality_label: preset?.evidence?.quality_label || "",
+          quality_notes: preset?.evidence?.quality_notes || "",
+          evidence_source_path: preset?.evidence?.evidence_source_path || null,
+          default_selected: Boolean(preset?.default_selected),
+          recommended: Boolean(preset?.recommended),
+          currently_active: Boolean(preset?.currently_active),
+          latest_for_preset: Boolean(preset?.latest_for_preset),
+          draft_count: preset?.draft_count || 0,
+          published_revision: preset?.published_revision,
+          preset_id: preset?.preset_id,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function summarizeCatalogVariant(source, primaryPublishedTargetId) {
+    return {
+      variant_id: source.variant_id,
+      display_name: source.variant_display_name,
+      publication_state: source.publication_state,
+      activatable: Boolean(source.activation_target_id),
+      activation_target_id: source.activation_target_id || null,
+      is_primary: false,
+      is_primary_published_target: Boolean(source.activation_target_id) && source.activation_target_id === primaryPublishedTargetId,
+      evidence_status: source.evidence_status,
+      matched_model: source.matched_model,
+      matched_file: source.matched_file,
+      quality_score: source.quality_score,
+      quality_label: source.quality_label,
+      tokens_per_second: source.tokens_per_second,
+      spinup_seconds: source.spinup_seconds,
+    };
+  }
+
+  function explainCatalogRow(row) {
+    if (row.catalog_shelf === "current" && row.primary_variant?.publication_state === "candidate") {
+      return `Current family with a stronger ${row.primary_variant.variant_id.toUpperCase()} candidate variant not yet published.`;
+    }
+    if (row.catalog_shelf === "promote_next") {
+      return `Bakeoff-proven candidate with ${row.quality_label || "scored"} evidence ready for promotion work.`;
+    }
+    if (row.catalog_shelf === "available_bench") {
+      return "Bench candidate kept visible for future wiring or comparison.";
+    }
+    return `Current catalog entry ranked by ${row.evidence_status} bakeoff evidence.`;
+  }
+
+  function actionHintForCatalogRow(row) {
+    if (!row.activatable && row.publication_state === "candidate") {
+      return "Candidate only — wire and publish this family before activation.";
+    }
+    if (row.primary_variant?.publication_state === "candidate" && row.activation_target_id) {
+      return `Primary variant is still a candidate. Published fallback remains available via ${row.activation_target_id}.`;
+    }
+    if (row.activation_target_id) {
+      return `Apply via published target ${row.activation_target_id}.`;
+    }
+    return "No activation target available yet.";
+  }
+
+  function buildStudioCatalog({ config, publishedPresets, activeSetId, scoreboardRows, selectedPath, evidenceState }) {
+    const generatedTargetLookup = new Map();
+    const currentSources = buildCatalogPublishedSources(config, publishedPresets, generatedTargetLookup);
+    const candidateSources = buildCatalogCandidateSources(config, scoreboardRows, selectedPath);
+    const grouped = new Map();
+    for (const source of [...currentSources, ...candidateSources]) {
+      const existing = grouped.get(source.catalog_entry_id) || {
+        catalog_entry_id: source.catalog_entry_id,
+        family_id: source.family_id,
+        mini_family_id: source.mini_family_id,
+        entry_type: source.entry_type,
+        display_name: source.display_name,
+        aliases: new Set(),
+        sources: [],
+      };
+      for (const alias of source.alias_ids || []) existing.aliases.add(alias);
+      existing.sources.push(source);
+      grouped.set(source.catalog_entry_id, existing);
+    }
+
+    const rows = [...grouped.values()].map((entry) => {
+      const generatedTargetId = catalogGeneratedActivationTargetId(entry.family_id, entry.mini_family_id);
+      const allSources = entry.sources.slice().sort(catalogVariantSort);
+      const publishedSources = allSources.filter((source) => source.publication_state === "current_published");
+      const currentSourcesOnly = publishedSources.length > 0;
+      const primaryVariant = allSources[0] || null;
+      const primaryPublished = publishedSources
+        .slice()
+        .sort((left, right) =>
+          ((right.activation_target_id === generatedTargetId) ? 1 : 0) - ((left.activation_target_id === generatedTargetId) ? 1 : 0) ||
+          catalogVariantSort(left, right))
+        [0] || null;
+      const recommendationState = currentSourcesOnly
+        ? (allSources.some((source) => source.publication_state === "candidate" && source.recommendation_state === "promote_next") ? "promote_next" : "current")
+        : (allSources.some((source) => source.recommendation_state === "promote_next") ? "promote_next" : "available_bench");
+      const catalogShelf = currentSourcesOnly ? "current" : (recommendationState === "promote_next" ? "promote_next" : "available_bench");
+      const primaryPublishedTargetId = primaryPublished?.activation_target_id || null;
+      const variants = allSources.map((source) => summarizeCatalogVariant(source, primaryPublishedTargetId));
+      if (variants.length > 0) variants[0].is_primary = true;
+      const row = {
+        catalog_entry_id: entry.catalog_entry_id,
+        family_id: entry.family_id,
+        display_name: entry.display_name,
+        entry_type: entry.entry_type,
+        mode: entry.entry_type,
+        combo_signature: entry.mini_family_id || null,
+        publication_state: currentSourcesOnly ? "current_published" : "candidate",
+        recommendation_state: recommendationState,
+        catalog_tier: currentSourcesOnly ? "tier1" : "tier2",
+        catalog_shelf: catalogShelf,
+        aliases: [...entry.aliases].sort(),
+        activation_target_id: primaryPublishedTargetId,
+        activation_target_ids: publishedSources.map((source) => source.activation_target_id).filter(Boolean),
+        activatable: Boolean(primaryPublishedTargetId),
+        currently_active: allSources.some((source) => source.activation_target_id && source.activation_target_id === activeSetId),
+        default_selected: allSources.some((source) => source.default_selected),
+        recommended: allSources.some((source) => source.recommended),
+        evidence_status: primaryVariant?.evidence_status || "unknown",
+        evidence_source_path: primaryVariant?.evidence_source_path || selectedPath || null,
+        quality_score: primaryVariant?.quality_score ?? null,
+        quality_label: primaryVariant?.quality_label || "",
+        tokens_per_second: primaryVariant?.tokens_per_second ?? null,
+        spinup_seconds: primaryVariant?.spinup_seconds ?? null,
+        matched_model: primaryVariant?.matched_model || null,
+        matched_file: primaryVariant?.matched_file || null,
+        primary_variant: variants[0] || null,
+        variants,
+        published_variant_count: publishedSources.length,
+        candidate_variant_count: allSources.length - publishedSources.length,
+        primary_variant_published: Boolean(primaryVariant?.activation_target_id),
+      };
+      row.why_ranked_here = explainCatalogRow(row);
+      row.operator_action_hint = actionHintForCatalogRow(row);
+      return row;
+    }).sort(catalogRowSort);
+
+    const shelves = {
+      current: {
+        solos: rows.filter((row) => row.catalog_shelf === "current" && row.entry_type === "solo"),
+        combos: rows.filter((row) => row.catalog_shelf === "current" && row.entry_type === "combo"),
+      },
+      promote_next: {
+        solos: rows.filter((row) => row.catalog_shelf === "promote_next" && row.entry_type === "solo"),
+        combos: rows.filter((row) => row.catalog_shelf === "promote_next" && row.entry_type === "combo"),
+      },
+      available_bench: {
+        solos: rows.filter((row) => row.catalog_shelf === "available_bench" && row.entry_type === "solo"),
+        combos: rows.filter((row) => row.catalog_shelf === "available_bench" && row.entry_type === "combo"),
+      },
+    };
+
+    let nextRank = 1;
+    for (const shelfKey of ["current", "promote_next", "available_bench"]) {
+      for (const bucketKey of ["solos", "combos"]) {
+        for (const row of shelves[shelfKey][bucketKey]) {
+          row.catalog_rank = nextRank;
+          row.shelf_rank = shelves[shelfKey][bucketKey].indexOf(row) + 1;
+          nextRank += 1;
+        }
+      }
+    }
+
+    return {
+      version: 1,
+      ranking_contract_version: 1,
+      normalization_version: 1,
+      compatibility_policy_version: 1,
+      generated_at: currentIso(),
+      evidence_set_hash: evidenceState?.source_signature || "",
+      ranking_input_hash: JSON.stringify([
+        evidenceState?.source_signature || "",
+        rows.map((row) => [row.catalog_entry_id, row.publication_state, row.evidence_status, row.activation_target_id || "", row.recommendation_state]),
+      ]),
+      rows,
+      shelves,
+      warnings: rows
+        .filter((row) => row.publication_state === "candidate" || row.evidence_status === "mismatched")
+        .map((row) => ({
+          catalog_entry_id: row.catalog_entry_id,
+          kind: row.publication_state === "candidate" ? "candidate" : "evidence_mismatch",
+          message: row.publication_state === "candidate"
+            ? "Candidate row is visible for planning but is not yet a published activation target."
+            : "Row is informed by family-level bakeoff evidence that does not match the deployed runtime family.",
+        })),
+    };
+  }
+
+  function defaultStudioEvidenceState() {
+    return {
+      version: 1,
+      generated_at: currentIso(),
+      stale: false,
+      source_signature: "",
+      selected_path: null,
+      sources: [],
+      presets: [],
+      recommendations: buildStudioRecommendations([], false),
+    };
+  }
+
+  async function ensureStudioEvidence({ force = false } = {}) {
+    const cached = await readJsonImpl(studioEvidencePath, null);
+    const source = await loadStudioScoreboardSource();
+    const signature = studioSourceSignature(source.sources);
+    if (!source.selected_path) {
+      if (cached && Array.isArray(cached?.presets)) {
+        return {
+          ...defaultStudioEvidenceState(),
+          ...cached,
+          stale: true,
+          source_signature: signature,
+          selected_path: null,
+          sources: source.sources,
+          presets: (cached.presets || []).map((entry) => ({
+            ...entry,
+            evidence_status: entry.matched_model ? "stale" : (entry.evidence_status || "unknown"),
+          })),
+          recommendations: buildStudioRecommendations([], true),
+        };
+      }
+      return {
+        ...defaultStudioEvidenceState(),
+        stale: true,
+        source_signature: signature,
+        sources: source.sources,
+        recommendations: buildStudioRecommendations([], true),
+      };
+    }
+    if (!force && cached && cached.source_signature === signature && Array.isArray(cached?.presets)) {
+      return cached;
+    }
+    const config = await loadValidatedConfig();
+    const presets = buildStudioEvidenceEntries(config, source.rows, source.selected_path);
+    const payload = {
+      version: 1,
+      generated_at: currentIso(),
+      stale: false,
+      source_signature: signature,
+      selected_path: source.selected_path,
+      sources: source.sources,
+      presets,
+      recommendations: buildStudioRecommendations(presets, false),
+    };
+    await writeJsonImpl(studioEvidencePath, payload);
+    return payload;
+  }
+
+  function findStudioPublishedSet(config, { presetId = "", publishedRevision = null, activationSetId = "" } = {}) {
+    const targetSetId = String(activationSetId || "").trim();
+    if (targetSetId) {
+      return allActivationSets(config).find((set) => String(set?.set_id || "") === targetSetId) || null;
+    }
+    const targetPresetId = String(presetId || "").trim();
+    const targetRevision = parsePublishedRevision(publishedRevision, -1);
+    return allActivationSets(config).find((set) =>
+      studioPresetIdForSet(set) === targetPresetId &&
+      studioRevisionForSet(set) === targetRevision) || null;
+  }
+
+  function resolveStudioDefaultSelection(entry, publishedPresets) {
+    if (!entry?.preset_id) {
+      return null;
+    }
+    const revision = parsePublishedRevision(entry?.published_revision, -1);
+    const match = publishedPresets.find((preset) =>
+      preset.preset_id === String(entry.preset_id || "").trim() &&
+      preset.published_revision === revision);
+    return {
+      preset_id: String(entry.preset_id || "").trim(),
+      published_revision: revision >= 0 ? revision : null,
+      activation_set_id: match?.activation_set_id || null,
+      valid: Boolean(match),
+    };
+  }
 
   async function registerActivationSet({ setId, displayName, description, laneTargets, persist = false } = {}) {
     const sid = String(setId || "").trim();
@@ -1980,26 +3068,16 @@ export function createRuntime({
     if (sets.find((s) => s.set_id === sid)) {
       return { ...apiError(ErrorCode.INPUT_INVALID, `set_id '${sid}' already registered`), accepted: false };
     }
-    // Validate profile IDs exist in catalog
-    const profiles = config.profiles || [];
-    const profileIds = new Set(profiles.map((p) => p.profile_id));
-    const largeId = String(laneTargets?.large || "").trim();
-    const miniId = String(laneTargets?.mini || "").trim();
-    if (largeId && !profileIds.has(largeId)) {
-      return { ...apiError(ErrorCode.PROFILE_NOT_FOUND, `unknown profile_id '${largeId}' for lane_targets.large`), accepted: false };
-    }
-    if (miniId && !profileIds.has(miniId)) {
-      return { ...apiError(ErrorCode.PROFILE_NOT_FOUND, `unknown profile_id '${miniId}' for lane_targets.mini`), accepted: false };
-    }
-    if (!largeId && !miniId) {
-      return { ...apiError(ErrorCode.INPUT_INVALID, "lane_targets must include at least one of large or mini"), accepted: false };
+    const validatedTargets = validateActivationSetTargets(config, laneTargets);
+    if (!validatedTargets.ok) {
+      return validatedTargets.error;
     }
     const newSet = {
       set_id: sid,
       display_name: String(displayName || sid),
       description: String(description || ""),
-      requires_dual_box: false,
-      lane_targets: { large: largeId || null, mini: miniId || null },
+      requires_dual_box: validatedTargets.requires_dual_box,
+      lane_targets: validatedTargets.lane_targets,
     };
     config.controller.activation_sets.push(newSet);
     _validatedConfig = config;  // update in-memory cache
@@ -2028,8 +3106,425 @@ export function createRuntime({
     return { ok: true, deleted: sid };
   }
 
+  async function getStudioSummary() {
+    const [current, models, activationSets, defaultsState, draftState, evidenceState, config, scoreboardSource] = await Promise.all([
+      currentState(),
+      modelsState(),
+      getActivationSets(),
+      loadStudioDefaults(),
+      loadStudioDraftState(),
+      ensureStudioEvidence(),
+      loadValidatedConfig(),
+      loadStudioScoreboardSource(),
+    ]);
+    const activeSetId = String(current?.desired_state?.active_set_id || "");
+    const evidenceByKey = new Map((evidenceState.presets || []).map((entry) => [
+      studioEvidenceKey(entry.preset_id, entry.published_revision),
+      entry,
+    ]));
+    const publishedPresets = allActivationSets(config).map((set) => {
+      const presetId = studioPresetIdForSet(set);
+      const publishedRevision = studioRevisionForSet(set);
+      const laneTargets = cleanLaneTargets(set?.lane_targets);
+      return {
+        preset_id: presetId,
+        activation_set_id: String(set?.set_id || ""),
+        published_revision: publishedRevision,
+        display_name: String(set?.display_name || presetId),
+        description: String(set?.description || ""),
+        lane_targets: laneTargets,
+        mode: studioModeForTargets(laneTargets),
+        requires_dual_box: Boolean(set?.requires_dual_box),
+        currently_active: String(set?.set_id || "") === activeSetId,
+        is_legacy: !Object.prototype.hasOwnProperty.call(set || {}, "published_revision"),
+        evidence_status: evidenceByKey.get(studioEvidenceKey(presetId, publishedRevision))?.evidence_status || "unknown",
+        evidence: evidenceByKey.get(studioEvidenceKey(presetId, publishedRevision)) || null,
+      };
+    });
+    const latestRevisionByPreset = new Map();
+    for (const preset of publishedPresets) {
+      const currentLatest = latestRevisionByPreset.get(preset.preset_id);
+      if (currentLatest == null || preset.published_revision > currentLatest) {
+        latestRevisionByPreset.set(preset.preset_id, preset.published_revision);
+      }
+    }
+    const recommendationKeys = new Set([evidenceState.recommendations?.solo, evidenceState.recommendations?.combo]
+      .filter(Boolean)
+      .map((entry) => studioEvidenceKey(entry.preset_id, entry.published_revision)));
+    const defaultKeys = new Set([defaultsState.solo, defaultsState.combo]
+      .filter(Boolean)
+      .map((entry) => studioEvidenceKey(entry.preset_id, entry.published_revision)));
+    const draftCounts = new Map();
+    for (const draft of draftState.drafts || []) {
+      const presetId = String(draft?.preset_id || "").trim();
+      if (!presetId) continue;
+      draftCounts.set(presetId, (draftCounts.get(presetId) || 0) + 1);
+    }
+    const enrichedPublishedPresets = annotateStudioCatalogPresets(publishedPresets
+      .map((preset) => ({
+        ...preset,
+        latest_for_preset: latestRevisionByPreset.get(preset.preset_id) === preset.published_revision,
+        default_selected: defaultKeys.has(studioEvidenceKey(preset.preset_id, preset.published_revision)),
+        recommended: recommendationKeys.has(studioEvidenceKey(preset.preset_id, preset.published_revision)),
+        draft_count: draftCounts.get(preset.preset_id) || 0,
+      })));
+    const catalog = buildStudioCatalog({
+      config,
+      publishedPresets: enrichedPublishedPresets,
+      activeSetId,
+      scoreboardRows: scoreboardSource.rows || [],
+      selectedPath: scoreboardSource.selected_path || null,
+      evidenceState,
+    });
+    return {
+      ok: true,
+      generated_at: currentIso(),
+      current,
+      models,
+      activation_sets: activationSets.activation_sets || activationSets.sets || [],
+      studio: {
+        published_presets: enrichedPublishedPresets,
+        drafts: (draftState.drafts || [])
+          .slice()
+          .sort((left, right) => String(right?.updated_at || "").localeCompare(String(left?.updated_at || ""))),
+        defaults: {
+          updated_at: defaultsState.updated_at,
+          solo: resolveStudioDefaultSelection(defaultsState.solo, enrichedPublishedPresets),
+          combo: resolveStudioDefaultSelection(defaultsState.combo, enrichedPublishedPresets),
+        },
+        recommendations: evidenceState.recommendations,
+        evidence_generated_at: evidenceState.generated_at,
+        evidence_stale: Boolean(evidenceState.stale),
+        evidence_sources: evidenceState.sources || [],
+        catalog,
+        action_log_tail: await readStudioActionLog(30),
+      },
+    };
+  }
+
+  async function saveStudioDraft({
+    draftId = "",
+    expectedDraftRevision = null,
+    presetId = "",
+    displayName = "",
+    description = "",
+    laneTargets = {},
+    sourceActivationSetId = "",
+    basePublishedRevision = null,
+  } = {}) {
+    const config = await loadValidatedConfig();
+    const validatedTargets = validateActivationSetTargets(config, laneTargets);
+    if (!validatedTargets.ok) {
+      return validatedTargets.error;
+    }
+    const draftsState = await loadStudioDraftState();
+    const targetDraftId = String(draftId || "").trim();
+    const existingIndex = targetDraftId
+      ? draftsState.drafts.findIndex((draft) => String(draft?.draft_id || "") === targetDraftId)
+      : -1;
+    const existing = existingIndex >= 0 ? draftsState.drafts[existingIndex] : null;
+    if (existing && expectedDraftRevision !== null &&
+      parsePublishedRevision(expectedDraftRevision, -1) !== parsePublishedRevision(existing?.draft_revision, -1)) {
+      return {
+        ...apiError(ErrorCode.REVISION_CONFLICT, `draft '${targetDraftId}' changed since revision ${expectedDraftRevision}`),
+        accepted: false,
+      };
+    }
+    const resolvedPresetId = sanitizeStudioId(
+      presetId || existing?.preset_id || displayName || targetDraftId || "preset",
+      "preset",
+    );
+    const resolvedDraftId = existing?.draft_id || targetDraftId || `draft_${sanitizeStudioId(uuid(), "draft").slice(0, 16)}`;
+    const nextDraft = {
+      draft_id: resolvedDraftId,
+      draft_revision: existing ? parsePublishedRevision(existing?.draft_revision, 0) + 1 : 1,
+      preset_id: resolvedPresetId,
+      display_name: String(displayName || existing?.display_name || resolvedPresetId),
+      description: String(description || existing?.description || ""),
+      lane_targets: validatedTargets.lane_targets,
+      mode: studioModeForTargets(validatedTargets.lane_targets),
+      requires_dual_box: validatedTargets.requires_dual_box,
+      source_activation_set_id: String(sourceActivationSetId || existing?.source_activation_set_id || "").trim() || null,
+      base_published_revision: basePublishedRevision === null
+        ? parsePublishedRevision(existing?.base_published_revision, 0)
+        : parsePublishedRevision(basePublishedRevision, 0),
+      last_published_revision: parsePublishedRevision(existing?.last_published_revision, 0) || null,
+      last_published_at: String(existing?.last_published_at || "").trim() || null,
+      created_at: existing?.created_at || currentIso(),
+      updated_at: currentIso(),
+    };
+    const drafts = draftsState.drafts.slice();
+    if (existingIndex >= 0) {
+      drafts[existingIndex] = nextDraft;
+    } else {
+      drafts.push(nextDraft);
+    }
+    await saveStudioDraftState({ ...draftsState, drafts });
+    await appendStudioActionLog({
+      action: "draft-save",
+      draft_id: resolvedDraftId,
+      preset_id: resolvedPresetId,
+      draft_revision: nextDraft.draft_revision,
+    });
+    return { ok: true, accepted: true, draft: nextDraft };
+  }
+
+  async function duplicateStudioDraft({ draftId = "", presetId = "", displayName = "" } = {}) {
+    const draftsState = await loadStudioDraftState();
+    const targetDraftId = String(draftId || "").trim();
+    const existing = draftsState.drafts.find((draft) => String(draft?.draft_id || "") === targetDraftId);
+    if (!existing) {
+      return { ...apiError(ErrorCode.DRAFT_NOT_FOUND, `unknown draft '${targetDraftId}'`), accepted: false };
+    }
+    const nextDraft = {
+      ...existing,
+      draft_id: `draft_${sanitizeStudioId(uuid(), "draft").slice(0, 16)}`,
+      draft_revision: 1,
+      preset_id: sanitizeStudioId(presetId || existing.preset_id, existing.preset_id || "preset"),
+      display_name: String(displayName || `${existing.display_name || existing.preset_id} Copy`),
+      created_at: currentIso(),
+      updated_at: currentIso(),
+    };
+    await saveStudioDraftState({
+      ...draftsState,
+      drafts: [...draftsState.drafts, nextDraft],
+    });
+    await appendStudioActionLog({
+      action: "draft-duplicate",
+      source_draft_id: targetDraftId,
+      draft_id: nextDraft.draft_id,
+      preset_id: nextDraft.preset_id,
+    });
+    return { ok: true, accepted: true, draft: nextDraft };
+  }
+
+  async function deleteStudioDraft({ draftId = "", expectedDraftRevision = null } = {}) {
+    const targetDraftId = String(draftId || "").trim();
+    if (!targetDraftId) {
+      return { ...apiError(ErrorCode.INPUT_INVALID, "draft_id is required"), accepted: false };
+    }
+    const draftsState = await loadStudioDraftState();
+    const existing = draftsState.drafts.find((draft) => String(draft?.draft_id || "") === targetDraftId);
+    if (!existing) {
+      return { ...apiError(ErrorCode.DRAFT_NOT_FOUND, `unknown draft '${targetDraftId}'`), accepted: false };
+    }
+    if (expectedDraftRevision !== null &&
+      parsePublishedRevision(expectedDraftRevision, -1) !== parsePublishedRevision(existing?.draft_revision, -1)) {
+      return {
+        ...apiError(ErrorCode.REVISION_CONFLICT, `draft '${targetDraftId}' changed since revision ${expectedDraftRevision}`),
+        accepted: false,
+      };
+    }
+    const drafts = draftsState.drafts.filter((draft) => String(draft?.draft_id || "") !== targetDraftId);
+    await saveStudioDraftState({ ...draftsState, drafts });
+    await appendStudioActionLog({
+      action: "draft-delete",
+      draft_id: targetDraftId,
+      preset_id: existing.preset_id,
+    });
+    return { ok: true, accepted: true, deleted: targetDraftId };
+  }
+
+  async function publishStudioDraft({ draftId = "", expectedDraftRevision = null, persist = true } = {}) {
+    const targetDraftId = String(draftId || "").trim();
+    if (!targetDraftId) {
+      return { ...apiError(ErrorCode.INPUT_INVALID, "draft_id is required"), accepted: false };
+    }
+    const draftsState = await loadStudioDraftState();
+    const existing = draftsState.drafts.find((draft) => String(draft?.draft_id || "") === targetDraftId);
+    if (!existing) {
+      return { ...apiError(ErrorCode.DRAFT_NOT_FOUND, `unknown draft '${targetDraftId}'`), accepted: false };
+    }
+    if (expectedDraftRevision !== null &&
+      parsePublishedRevision(expectedDraftRevision, -1) !== parsePublishedRevision(existing?.draft_revision, -1)) {
+      return {
+        ...apiError(ErrorCode.REVISION_CONFLICT, `draft '${targetDraftId}' changed since revision ${expectedDraftRevision}`),
+        accepted: false,
+      };
+    }
+    const config = await loadValidatedConfig();
+    const validatedTargets = validateActivationSetTargets(config, existing.lane_targets);
+    if (!validatedTargets.ok) {
+      return validatedTargets.error;
+    }
+    const presetId = sanitizeStudioId(existing.preset_id || existing.display_name || existing.draft_id, "preset");
+    const nextRevision = allActivationSets(config)
+      .filter((set) => studioPresetIdForSet(set) === presetId)
+      .reduce((maxRevision, set) => Math.max(maxRevision, studioRevisionForSet(set)), 0) + 1;
+    const activationSetId = formatPublishedStudioSetId(presetId, nextRevision);
+    if (allActivationSets(config).some((set) => String(set?.set_id || "") === activationSetId)) {
+      return {
+        ...apiError(ErrorCode.INPUT_INVALID, `activation set '${activationSetId}' already exists`),
+        accepted: false,
+      };
+    }
+    const publishedSet = {
+      set_id: activationSetId,
+      studio_preset_id: presetId,
+      published_revision: nextRevision,
+      display_name: String(existing.display_name || presetId),
+      description: String(existing.description || ""),
+      requires_dual_box: validatedTargets.requires_dual_box,
+      lane_targets: validatedTargets.lane_targets,
+    };
+    config.controller.activation_sets.push(publishedSet);
+    if (persist) {
+      await writeJsonImpl(configPath, config);
+    }
+    _validatedConfig = config;
+    const drafts = draftsState.drafts.map((draft) =>
+      String(draft?.draft_id || "") === targetDraftId
+        ? {
+          ...draft,
+          last_published_revision: nextRevision,
+          last_published_at: currentIso(),
+          updated_at: currentIso(),
+        }
+        : draft);
+    await saveStudioDraftState({ ...draftsState, drafts });
+    await ensureStudioEvidence({ force: true });
+    await appendStudioActionLog({
+      action: "publish",
+      draft_id: targetDraftId,
+      preset_id: presetId,
+      published_revision: nextRevision,
+      activation_set_id: activationSetId,
+      persist: Boolean(persist),
+    });
+    return {
+      ok: true,
+      accepted: true,
+      preset_id: presetId,
+      published_revision: nextRevision,
+      activation_set_id: activationSetId,
+      persisted: Boolean(persist),
+    };
+  }
+
+  async function applyStudioPreset({
+    presetId = "",
+    publishedRevision = null,
+    activationSetId = "",
+    wait = false,
+    allowPreempt = true,
+    force = false,
+    dryRun = false,
+  } = {}) {
+    const config = await loadValidatedConfig();
+    const selected = findStudioPublishedSet(config, {
+      presetId,
+      publishedRevision,
+      activationSetId,
+    });
+    if (!selected) {
+      const detail = activationSetId
+        ? `unknown studio activation set '${activationSetId}'`
+        : `unknown studio preset '${presetId}' revision ${publishedRevision}`;
+      return { ...apiError(ErrorCode.PRESET_NOT_FOUND, detail), accepted: false };
+    }
+    await appendStudioActionLog({
+      action: "apply-request",
+      preset_id: studioPresetIdForSet(selected),
+      published_revision: studioRevisionForSet(selected),
+      activation_set_id: String(selected?.set_id || ""),
+      wait: Boolean(wait),
+      dry_run: Boolean(dryRun),
+    });
+    const payload = await activateSet({
+      setId: String(selected?.set_id || ""),
+      wait,
+      allowPreempt,
+      force,
+      dryRun,
+    });
+    return {
+      ...payload,
+      preset_id: studioPresetIdForSet(selected),
+      published_revision: studioRevisionForSet(selected),
+      activation_set_id: String(selected?.set_id || ""),
+    };
+  }
+
+  async function setStudioDefault({ mode = "", presetId = "", publishedRevision = null, activationSetId = "" } = {}) {
+    const targetMode = String(mode || "").trim().toLowerCase();
+    if (!["solo", "combo"].includes(targetMode)) {
+      return { ...apiError(ErrorCode.INPUT_INVALID, "mode must be 'solo' or 'combo'"), accepted: false };
+    }
+    const config = await loadValidatedConfig();
+    const selected = findStudioPublishedSet(config, {
+      presetId,
+      publishedRevision,
+      activationSetId,
+    });
+    if (!selected) {
+      const detail = activationSetId
+        ? `unknown studio activation set '${activationSetId}'`
+        : `unknown studio preset '${presetId}' revision ${publishedRevision}`;
+      return { ...apiError(ErrorCode.PRESET_NOT_FOUND, detail), accepted: false };
+    }
+    const selectedMode = studioModeForTargets(cleanLaneTargets(selected?.lane_targets));
+    if (selectedMode !== targetMode) {
+      return {
+        ...apiError(
+          ErrorCode.INPUT_INVALID,
+          `preset '${studioPresetIdForSet(selected)}' revision ${studioRevisionForSet(selected)} is ${selectedMode}, not ${targetMode}`,
+        ),
+        accepted: false,
+      };
+    }
+    const defaultsState = await loadStudioDefaults();
+    const saved = await saveStudioDefaults({
+      ...defaultsState,
+      [targetMode]: {
+        preset_id: studioPresetIdForSet(selected),
+        published_revision: studioRevisionForSet(selected),
+      },
+    });
+    await appendStudioActionLog({
+      action: "default-set",
+      mode: targetMode,
+      preset_id: studioPresetIdForSet(selected),
+      published_revision: studioRevisionForSet(selected),
+      activation_set_id: String(selected?.set_id || ""),
+    });
+    return {
+      ok: true,
+      accepted: true,
+      mode: targetMode,
+      preset_id: studioPresetIdForSet(selected),
+      published_revision: studioRevisionForSet(selected),
+      updated_at: saved.updated_at,
+    };
+  }
+
+  async function refreshStudioEvidence() {
+    const evidence = await ensureStudioEvidence({ force: true });
+    await appendStudioActionLog({
+      action: "evidence-refresh",
+      stale: Boolean(evidence.stale),
+      selected_path: evidence.selected_path || null,
+      preset_count: Array.isArray(evidence.presets) ? evidence.presets.length : 0,
+    });
+    return { ok: true, ...evidence };
+  }
+
+  async function getStudioActionLog(limit = 30) {
+    return {
+      ok: true,
+      entries: await readStudioActionLog(limit),
+    };
+  }
+
   async function bonzai() {
     const config = await loadValidatedConfig();
+    // Route through activateSet so active_set_id is written to desired_state.
+    const bonzaiSetId = config.controller?.bonzai_set_id;
+    if (bonzaiSetId) {
+      const result = await activateSet({ setId: bonzaiSetId, wait: true, allowPreempt: true });
+      await fireWebhook("bonzai", { result_status: result?.status || "unknown" });
+      return result;
+    }
+    // Fallback if bonzai_set_id is not configured (preserves old behaviour).
     await stopLane("large");
     const result = await activate({
       profileId: config.controller?.bonzai_profile_id || "gguf_coder_next_large",
@@ -2384,6 +3879,15 @@ export function createRuntime({
     getActivationSets,
     registerActivationSet,
     deleteActivationSet,
+    getStudioSummary,
+    saveStudioDraft,
+    duplicateStudioDraft,
+    deleteStudioDraft,
+    publishStudioDraft,
+    applyStudioPreset,
+    setStudioDefault,
+    refreshStudioEvidence,
+    getStudioActionLog,
     restartLane,
     stopLane,
     bonzai,

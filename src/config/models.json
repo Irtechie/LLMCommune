@@ -5,7 +5,188 @@
     "public_base_url": "http://192.168.1.203:4000",
     "default_ready_timeout_s": 900,
     "default_poll_interval_ms": 2000,
-    "bonzai_profile_id": "gguf_coder_next_large"
+    "bonzai_profile_id": "gguf_coder_next_large",
+    "bonzai_set_id": "qwen80nextcoder",
+    "activation_sets": [
+      {
+        "set_id": "gamenator_gpt",
+        "display_name": "Gamenator GPT",
+        "description": "Run the Gamenator large lane on GPT OSS 120B while keeping the Gemma 31B mini lane available for game review.",
+        "lane_targets": {
+          "large": "trt_dual_gpt_oss_120b_large",
+          "mini": "gguf_gemma4_31b_mini"
+        }
+      },
+      {
+        "set_id": "gamenator_qwen",
+        "display_name": "Gamenator Qwen",
+        "description": "Run the Gamenator large lane on Qwen3 Next 80B while keeping the Gemma 31B mini lane available for game review.",
+        "lane_targets": {
+          "large": "gguf_qwen3_next_80b_large",
+          "mini": "gguf_gemma4_31b_mini"
+        }
+      },
+      {
+        "set_id": "inferno",
+        "display_name": "Inferno Solo",
+        "description": "Gemma 4 31B GGUF at full 252K context. Consumes full single-box VRAM; mini lane is dark.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_gemma4_31b_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "gemma431trt",
+        "display_name": "Gemma 4 31B TRT Solo",
+        "description": "Gemma 4 31B TRT-LLM NVFP4 on large lane only. Faster than GGUF via tensor cores; mini lane dark.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "trt_single_gemma4_31b_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "gemma431-gemma431mini",
+        "display_name": "Gemma 4 31B + Gemma 4 31B Reviewer",
+        "description": "GGUF Gemma 4 31B on large (252K ctx) + Gemma 4 31B mini reviewer on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_gemma4_31b_large",
+          "mini": "gguf_gemma4_31b_mini"
+        }
+      },
+      {
+        "set_id": "qwen80next",
+        "display_name": "Qwen3 Next 80B Solo",
+        "description": "Qwen3 Next 80B A3B GGUF on large lane only. Mini lane dark to maximize VRAM.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_qwen3_next_80b_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "qwen80next-gemma431mini",
+        "display_name": "Qwen3 Next 80B + Gemma 4 31B Reviewer",
+        "description": "Qwen3 Next 80B large + Gemma 4 31B GGUF mini reviewer on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_qwen3_next_80b_large",
+          "mini": "gguf_gemma4_31b_mini"
+        }
+      },
+      {
+        "set_id": "qwen80next-qwen30mini",
+        "display_name": "Qwen3 Next 80B + Qwen3 30B Mini",
+        "description": "Qwen3 Next 80B large + Qwen3 30B A3B TRT-LLM mini on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_qwen3_next_80b_large",
+          "mini": "trt_single_qwen3_30b_a3b_mini"
+        }
+      },
+      {
+        "set_id": "qwen80next-deepseek32mini",
+        "display_name": "Qwen3 Next 80B + DeepSeek R1 32B Mini",
+        "description": "Qwen3 Next 80B large + DeepSeek R1 Distill Qwen 32B mini reasoning lane on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_qwen3_next_80b_large",
+          "mini": "gguf_deepseek_32b_mini"
+        }
+      },
+      {
+        "set_id": "qwen80nextcoder",
+        "display_name": "CoderNext GGUF Solo",
+        "description": "Qwen3 Coder Next GGUF on large lane only. Bonzai default target. Mini dark.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_coder_next_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "qwen80nextcoder-gemma431mini",
+        "display_name": "CoderNext GGUF + Gemma 4 31B Reviewer",
+        "description": "Qwen3 Coder Next large + Gemma 4 31B mini reviewer on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_coder_next_large",
+          "mini": "gguf_gemma4_31b_mini"
+        }
+      },
+      {
+        "set_id": "qwen235",
+        "display_name": "Qwen3 235B Dual Solo",
+        "description": "Qwen3 235B A22B NVFP4 dual-box TRT-LLM. Occupies both spark-f147 and gx10-b041. Mini dark.",
+        "requires_dual_box": true,
+        "lane_targets": {
+          "large": "trt_dual_qwen235_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "qwen235-gemma431mini",
+        "display_name": "Qwen3 235B Dual + Gemma 4 31B Reviewer",
+        "description": "Qwen3 235B dual-box large + Gemma 4 31B mini reviewer on :7999.",
+        "requires_dual_box": true,
+        "lane_targets": {
+          "large": "trt_dual_qwen235_large",
+          "mini": "gguf_gemma4_31b_mini"
+        }
+      },
+      {
+        "set_id": "qwen235-qwen32mini",
+        "display_name": "Qwen3 235B Dual + Qwen3 32B Mini",
+        "description": "Qwen3 235B dual-box large + Qwen3 32B NVFP4 TRT mini on :7999.",
+        "requires_dual_box": true,
+        "lane_targets": {
+          "large": "trt_dual_qwen235_large",
+          "mini": "trt_single_qwen3_32b_mini"
+        }
+      },
+      {
+        "set_id": "llama370",
+        "display_name": "Llama 3.3 70B Dual Solo",
+        "description": "Llama 3.3 70B FP4 dual-box TRT-LLM. Both boxes occupied. Mini dark.",
+        "requires_dual_box": true,
+        "lane_targets": {
+          "large": "trt_dual_llama33_70b_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "llama370-gemma431mini",
+        "display_name": "Llama 3.3 70B Dual + Gemma 4 31B Reviewer",
+        "description": "Llama 3.3 70B dual-box large + Gemma 4 31B mini reviewer on :7999.",
+        "requires_dual_box": true,
+        "lane_targets": {
+          "large": "trt_dual_llama33_70b_large",
+          "mini": "gguf_gemma4_31b_mini"
+        }
+      },
+      {
+        "set_id": "gptoss120",
+        "display_name": "GPT-OSS 120B Dual Solo",
+        "description": "OpenAI GPT-OSS 120B dual-box TRT-LLM. Both boxes occupied. Mini dark.",
+        "requires_dual_box": true,
+        "lane_targets": {
+          "large": "trt_dual_gpt_oss_120b_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "nemotron120",
+        "display_name": "Nemotron 3 Super 120B Dual Solo",
+        "description": "NVIDIA Nemotron 3 Super 120B A12B NVFP4 dual-box TRT-LLM. Both boxes occupied. Mini dark.",
+        "requires_dual_box": true,
+        "lane_targets": {
+          "large": "trt_dual_nemotron120_large",
+          "mini": null
+        }
+      }
+    ]
   },
   "hosts": {
     "spark": {
@@ -144,6 +325,35 @@
       "notes": "Large single-box GGUF lane on spark."
     },
     {
+      "profile_id": "trt_single_gemma4_31b_large",
+      "display_name": "Gemma 4 31B NVFP4",
+      "model_id": "nvidia/Gemma-4-31B-IT-NVFP4",
+      "runtime_family": "trtllm",
+      "size_class": "large",
+      "parameter_count_b": 31,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_gemma4_31b_nvfp4_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 30,
+        "cold_start_s": 240,
+        "ready_timeout_s": 900
+      },
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Gemma-4-31B-IT-NVFP4/files",
+        "gx10": ""
+      },
+      "selection_role": "cli_candidate",
+      "cli_selectable": true,
+      "notes": "Single-box Gemma 4 31B NVFP4 via TRT-LLM on spark. Faster than GGUF variant; use this as the default Gemma lane."
+    },
+    {
       "profile_id": "gguf_gemma4_31b_large",
       "display_name": "Gemma 4 31B GGUF",
       "model_id": "google/gemma-4-31B-it",
@@ -170,7 +380,36 @@
       },
       "selection_role": "cli_candidate",
       "cli_selectable": true,
-      "notes": "Single-box Gemma 4 31B GGUF lane on spark. Includes local mmproj sidecar for image understanding."
+      "notes": "Single-box Gemma 4 31B GGUF lane on spark. Includes local mmproj sidecar for image understanding. Kept as fallback; prefer trt_single_gemma4_31b_large."
+    },
+    {
+      "profile_id": "gguf_gemma4_31b_mini",
+      "display_name": "Gemma 4 31B GGUF Mini Reviewer",
+      "model_id": "google/gemma-4-31B-it",
+      "runtime_family": "llama.cpp",
+      "size_class": "mini",
+      "parameter_count_b": 31,
+      "default_lane": "mini",
+      "allowed_lanes": [
+        "mini"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_gemma4_31b_7999.sh",
+      "startup_expectation": {
+        "warm_switch_s": 15,
+        "cold_start_s": 120,
+        "ready_timeout_s": 300
+      },
+      "model_paths": {
+        "spark": "/mnt/models/google/gemma-4-31B-it-GGUF/files/gemma-4-31B-it-Q4_K_M.gguf",
+        "gx10": ""
+      },
+      "selection_role": "gamenator_reviewer",
+      "cli_selectable": true,
+      "notes": "Mini-lane Gemma reviewer profile on :7999. Uses the proven local GGUF artifact at 32K context without the mmproj sidecar by default."
     },
     {
       "profile_id": "trt_single_qwen3_30b_a3b_mini",
@@ -259,6 +498,36 @@
       "selection_role": "cli_dual_candidate",
       "cli_selectable": true,
       "notes": "Reserves both boxes and serves through spark:8000."
+    },
+    {
+      "profile_id": "trt_dual_nemotron120_large",
+      "display_name": "Nemotron 3 Super 120B A12B NVFP4",
+      "model_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+      "runtime_family": "trtllm",
+      "size_class": "large",
+      "parameter_count_b": 120,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": true,
+      "backing_hosts": [
+        "spark",
+        "gx10"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_dual_nemotron120_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 60,
+        "cold_start_s": 600,
+        "ready_timeout_s": 1800
+      },
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/files"
+      },
+      "selection_role": "cli_dual_candidate",
+      "cli_selectable": true,
+      "notes": "Dual-box TRT lane wired per local controller policy. Keep the initial recipe conservative at 65536 tokens until the two-box path is proven locally."
     },
     {
       "profile_id": "trt_dual_llama33_70b_large",
@@ -369,14 +638,32 @@
       "recommended_container": "llama.cpp on host",
       "runtime_notes": "Single-box large reasoning lane."
     },
+    "trt_single_gemma4_31b_large": {
+      "support_status": "pending_download",
+      "evidence_level": "official_only",
+      "recommended_action": "activate_after_download",
+      "official_max_context_tokens": 131072,
+      "recommended_context_tokens": 32768,
+      "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6",
+      "runtime_notes": "Official NVIDIA NVFP4 build. Faster than GGUF on GB10 FP4 tensor cores. Activate once nvidia/Gemma-4-31B-IT-NVFP4 is fully downloaded to /mnt/models/nvidia/Gemma-4-31B-IT-NVFP4/files."
+    },
     "gguf_gemma4_31b_large": {
       "support_status": "proven_local",
       "evidence_level": "local_and_official",
-      "recommended_action": "keep_active",
+      "recommended_action": "keep_as_fallback",
       "official_max_context_tokens": 262144,
       "recommended_context_tokens": 262144,
       "recommended_container": "llama.cpp on host",
-      "runtime_notes": "Single-box Gemma 4 31B GGUF lane with local mmproj sidecar for image understanding. Locally verified through 262144 context on one GB10."
+      "runtime_notes": "Single-box Gemma 4 31B GGUF lane with local mmproj sidecar for image understanding. Locally verified through 262144 context on one GB10. Fallback for mmproj/vision use cases."
+    },
+    "gguf_gemma4_31b_mini": {
+      "support_status": "local_artifact_retargeted",
+      "evidence_level": "local_artifact_large_lane_proven",
+      "recommended_action": "validate_as_gamenator_reviewer",
+      "official_max_context_tokens": 262144,
+      "recommended_context_tokens": 32768,
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Retargets the proven Gemma 4 31B GGUF artifact onto the mini lane at 32K context for reviewer use. Do not assume the 64K mini-lane target until a paired large+mini run proves it."
     },
     "trt_single_qwen3_30b_a3b_mini": {
       "support_status": "proven_local",
@@ -404,6 +691,15 @@
       "recommended_context_tokens": 131072,
       "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6",
       "runtime_notes": "Dual-box TRT lane. Use socket mode on the CX7 link."
+    },
+    "trt_dual_nemotron120_large": {
+      "support_status": "pending_download",
+      "evidence_level": "official_only",
+      "recommended_action": "activate_after_download",
+      "official_max_context_tokens": 1000000,
+      "recommended_context_tokens": 65536,
+      "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6",
+      "runtime_notes": "Dual-box TRT lane requested locally. Official model card advertises up to 1M context, but keep the first commune recipe conservative at 65536 tokens until local runs prove the path."
     },
     "trt_dual_llama33_70b_large": {
       "support_status": "proven_local",
@@ -532,6 +828,16 @@
       "model_paths": {
         "spark": "/mnt/models/nvidia/NVIDIA-Nemotron-Nano-9B-v2/files",
         "gx10": "/mnt/models/nvidia/NVIDIA-Nemotron-Nano-9B-v2/files"
+      }
+    },
+    {
+      "model_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+      "display_name": "NVIDIA Nemotron 3 Super 120B A12B NVFP4",
+      "size_class": "large",
+      "parameter_count_b": 120,
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/files",
+        "gx10": "/mnt/models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/files"
       }
     },
     {
@@ -766,6 +1072,14 @@
       "recommended_context_tokens": 65536,
       "notes": "Official NVIDIA reasoning mini with 128K context and strong 128K RULER positioning. Downloaded to both boxes; runtime path still needs proving here."
     },
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4": {
+      "preferred_runtime": "trtllm",
+      "topology_hint": "dual_box",
+      "support_status": "wired_pending_download",
+      "recommended_action": "download_then_activate",
+      "recommended_context_tokens": 65536,
+      "notes": "Official NVIDIA Nemotron 3 Super 120B NVFP4 lane wired into the controller as a dual-box TRT target. Model card advertises up to 1M context, but the initial commune recipe stays conservative at 64K until local runs prove it."
+    },
     "nvidia/Qwen3-235B-A22B-NVFP4": {
       "preferred_runtime": "trtllm",
       "topology_hint": "dual_box",
@@ -888,6 +1202,78 @@
     }
   },
   "candidate_models": [
+    {
+      "model_id": "Qwen/Qwen3.6-35B-A3B-UD-Q4_K_M",
+      "display_name": "Qwen3.6 35B A3B GGUF",
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "single_box",
+      "support_status": "bakeoff_proven_not_wired",
+      "recommended_action": "promote_next",
+      "recommended_context_tokens": 32768,
+      "scoreboard_file": "qwen36_35b_gguf.json",
+      "catalog_family_id": "qwen36",
+      "notes": "Strong single-box bakeoff performer. Promote into the catalog once wired into the controller."
+    },
+    {
+      "model_id": "openai/gpt-oss-120b-gguf",
+      "display_name": "GPT-OSS 120B GGUF",
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "dual_box",
+      "support_status": "bakeoff_proven_not_wired",
+      "recommended_action": "promote_next",
+      "recommended_context_tokens": 32768,
+      "scoreboard_file": "gptoss120b_gguf.json",
+      "catalog_family_id": "gptoss120",
+      "notes": "Bakeoff winner over the TRT path. Promote as the preferred GPT-OSS runtime when wiring lands."
+    },
+    {
+      "model_id": "openai/gpt-oss-20b-gguf",
+      "display_name": "GPT-OSS 20B GGUF",
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "single_box",
+      "support_status": "bakeoff_proven_not_wired",
+      "recommended_action": "promote_next",
+      "recommended_context_tokens": 32768,
+      "scoreboard_file": "gptoss20b_gguf.json",
+      "catalog_family_id": "gptoss20",
+      "notes": "Fastest bakeoff path in the OSS family. Keep visible as a candidate even before controller wiring."
+    },
+    {
+      "model_id": "Qwen/Qwen3.5-122B-A10B-Q4_K_M",
+      "display_name": "Qwen3.5 122B GGUF",
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "dual_box",
+      "support_status": "bench_candidate",
+      "recommended_action": "available_bench",
+      "recommended_context_tokens": 32768,
+      "scoreboard_file": "qwen35_122b_gguf.json",
+      "catalog_family_id": "qwen35-122b",
+      "notes": "Strong but slower than the top promote-next models. Keep on the visible bench."
+    },
+    {
+      "model_id": "Qwen/Qwen3.5-122B-A10B-NVFP4",
+      "display_name": "Qwen3.5 122B vLLM",
+      "preferred_runtime": "vllm",
+      "topology_hint": "dual_box",
+      "support_status": "bench_candidate",
+      "recommended_action": "available_bench",
+      "recommended_context_tokens": 32768,
+      "scoreboard_file": "qwen35_122b_vllm.json",
+      "catalog_family_id": "qwen35-122b",
+      "notes": "Keep as a visible bench variant for the Qwen3.5 family."
+    },
+    {
+      "model_id": "MiniMax/MiniMax-M2.7-UD-IQ4_XS",
+      "display_name": "MiniMax M2.7 GGUF",
+      "preferred_runtime": "llama.cpp",
+      "topology_hint": "single_box",
+      "support_status": "bench_candidate",
+      "recommended_action": "available_bench",
+      "recommended_context_tokens": 32768,
+      "scoreboard_file": "minimax_m27_gguf.json",
+      "catalog_family_id": "minimax-m27",
+      "notes": "Interesting bench candidate with acceptable quality but weaker overall promotion signal."
+    },
     {
       "model_id": "QuantTrio/Qwen3-VL-235B-A22B-Instruct-AWQ",
       "display_name": "Qwen3 VL 235B A22B AWQ",

@@ -1,0 +1,1267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLMCommune Preset Studio</title>
+  <style>
+    :root {
+      --bg: #07111f;
+      --bg-2: #0d1830;
+      --panel: rgba(12, 23, 44, 0.72);
+      --panel-strong: rgba(9, 18, 36, 0.9);
+      --border: rgba(126, 167, 255, 0.18);
+      --text: #edf4ff;
+      --muted: #94a9c9;
+      --soft: #6f84a9;
+      --green: #4ade80;
+      --amber: #fbbf24;
+      --red: #f87171;
+      --blue: #60a5fa;
+      --cyan: #22d3ee;
+      --violet: #a78bfa;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+      --radius: 24px;
+    }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(34, 211, 238, 0.16), transparent 26%),
+        radial-gradient(circle at top right, rgba(96, 165, 250, 0.18), transparent 24%),
+        radial-gradient(circle at bottom center, rgba(167, 139, 250, 0.12), transparent 30%),
+        linear-gradient(160deg, var(--bg), var(--bg-2) 56%, #050913 100%);
+      font-family: "Aptos", "Segoe UI Variable Display", "Inter Tight", "Segoe UI", sans-serif;
+      letter-spacing: 0.01em;
+    }
+    .shell { width: min(1480px, calc(100vw - 32px)); margin: 24px auto 48px; }
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 32px;
+      padding: 28px 28px 24px;
+      background: linear-gradient(135deg, rgba(14, 29, 58, 0.94), rgba(7, 16, 32, 0.88));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+    .hero::before,
+    .hero::after {
+      content: "";
+      position: absolute;
+      border-radius: 999px;
+      filter: blur(24px);
+      opacity: 0.75;
+      pointer-events: none;
+    }
+    .hero::before {
+      width: 240px;
+      height: 240px;
+      right: -40px;
+      top: -90px;
+      background: radial-gradient(circle, rgba(34, 211, 238, 0.32), transparent 70%);
+    }
+    .hero::after {
+      width: 320px;
+      height: 320px;
+      left: -120px;
+      bottom: -160px;
+      background: radial-gradient(circle, rgba(167, 139, 250, 0.22), transparent 70%);
+    }
+    .hero-top {
+      display: flex;
+      gap: 24px;
+      align-items: flex-start;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      position: relative;
+      z-index: 1;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(96, 165, 250, 0.12);
+      border: 1px solid rgba(96, 165, 250, 0.18);
+      color: #c9dcff;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-weight: 700;
+    }
+    h1 {
+      margin: 18px 0 10px;
+      font-size: clamp(32px, 4vw, 58px);
+      line-height: 0.95;
+      letter-spacing: -0.05em;
+      max-width: 11ch;
+    }
+    .sub {
+      max-width: 64ch;
+      color: var(--muted);
+      line-height: 1.55;
+      font-size: 15px;
+    }
+    .hero-stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(130px, 1fr));
+      gap: 14px;
+      margin-top: 22px;
+      position: relative;
+      z-index: 1;
+    }
+    .stat {
+      padding: 16px 18px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      min-height: 92px;
+    }
+    .stat-label {
+      color: var(--soft);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-bottom: 12px;
+      font-weight: 700;
+    }
+    .stat-value { font-size: 26px; font-weight: 700; letter-spacing: -0.04em; }
+    .stat-note { margin-top: 6px; color: var(--muted); font-size: 13px; }
+    .layout { display: grid; grid-template-columns: 1.3fr 1fr; gap: 18px; margin-top: 18px; }
+    .stack { display: grid; gap: 18px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(16px);
+      overflow: hidden;
+    }
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 18px 20px 10px;
+    }
+    .panel-title { font-size: 18px; font-weight: 700; letter-spacing: -0.03em; }
+    .panel-meta { color: var(--muted); font-size: 13px; }
+    .panel-body { padding: 0 20px 20px; }
+    .lane-grid, .service-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .lane-card, .service-card, .action-card, .table-card {
+      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 20px;
+      padding: 16px;
+    }
+    .lane-top, .service-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .lane-name, .service-name { font-size: 15px; font-weight: 700; letter-spacing: -0.02em; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border: 1px solid transparent;
+    }
+    .chip.up { color: var(--green); background: rgba(74, 222, 128, 0.12); border-color: rgba(74, 222, 128, 0.2); }
+    .chip.warn { color: var(--amber); background: rgba(251, 191, 36, 0.12); border-color: rgba(251, 191, 36, 0.18); }
+    .chip.down { color: var(--red); background: rgba(248, 113, 113, 0.12); border-color: rgba(248, 113, 113, 0.18); }
+    .chip.idle { color: #c5d4ef; background: rgba(148, 169, 201, 0.14); border-color: rgba(148, 169, 201, 0.18); }
+    .facts { display: grid; gap: 10px; }
+    .fact { display: grid; grid-template-columns: 118px 1fr; gap: 10px; align-items: start; font-size: 13px; }
+    .fact-label { color: var(--soft); text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; }
+    .fact-value { color: var(--text); word-break: break-word; }
+    .actions-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .button-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+    button, select, input, textarea { font: inherit; }
+    button {
+      appearance: none;
+      border: 1px solid transparent;
+      border-radius: 14px;
+      padding: 12px 16px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      color: white;
+      cursor: pointer;
+      transition: transform 0.16s ease, opacity 0.16s ease, border-color 0.16s ease;
+      background: linear-gradient(135deg, rgba(96,165,250,0.55), rgba(34,211,238,0.42));
+    }
+    button:hover { transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button:disabled { opacity: 0.42; cursor: not-allowed; transform: none; }
+    button.alt { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.1); color: var(--text); }
+    button.warn { background: linear-gradient(135deg, rgba(180,83,9,0.8), rgba(251,191,36,0.34)); }
+    button.danger { background: linear-gradient(135deg, rgba(127,29,29,0.92), rgba(248,113,113,0.36)); }
+    button.good { background: linear-gradient(135deg, rgba(21,128,61,0.92), rgba(74,222,128,0.28)); }
+    .field-grid { display: grid; grid-template-columns: 1.1fr 1fr auto; gap: 10px; margin-top: 12px; }
+    .field-grid.dual { grid-template-columns: 1fr 1fr; }
+    select, input, textarea {
+      width: 100%;
+      border-radius: 14px;
+      padding: 12px 14px;
+      color: var(--text);
+      background: rgba(6, 12, 24, 0.72);
+      border: 1px solid rgba(255,255,255,0.1);
+      outline: none;
+    }
+    textarea { min-height: 92px; resize: vertical; }
+    select:focus, input:focus, textarea:focus { border-color: rgba(96,165,250,0.55); box-shadow: 0 0 0 4px rgba(96,165,250,0.12); }
+    .tiny { font-size: 12px; color: var(--muted); line-height: 1.5; }
+    .table-wrap {
+      overflow: auto;
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(2, 8, 20, 0.36);
+    }
+    table { width: 100%; border-collapse: collapse; min-width: 880px; }
+    th, td {
+      padding: 12px 14px;
+      text-align: left;
+      font-size: 13px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      vertical-align: top;
+    }
+    th {
+      color: var(--soft);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      background: rgba(255,255,255,0.02);
+      position: sticky;
+      top: 0;
+      backdrop-filter: blur(8px);
+    }
+    tbody tr:hover { background: rgba(255,255,255,0.03); }
+    code { font-family: "Cascadia Code", "Aptos Mono", "Consolas", monospace; font-size: 12px; color: #c8ddff; }
+    .log {
+      min-height: 180px;
+      max-height: 260px;
+      overflow: auto;
+      border-radius: 18px;
+      padding: 16px;
+      background: rgba(2, 8, 20, 0.54);
+      border: 1px solid rgba(255,255,255,0.08);
+      font-family: "Cascadia Code", "Aptos Mono", monospace;
+      font-size: 12px;
+      color: #b8caf0;
+      white-space: pre-wrap;
+    }
+    .footer-note { margin-top: 14px; color: var(--soft); font-size: 12px; }
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      max-width: 360px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: var(--panel-strong);
+      border: 1px solid rgba(255,255,255,0.1);
+      box-shadow: var(--shadow);
+      color: var(--text);
+      font-size: 13px;
+      backdrop-filter: blur(16px);
+      display: none;
+      z-index: 40;
+    }
+    .spinner {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      background: currentColor;
+      box-shadow: 18px 0 currentColor, -18px 0 currentColor;
+      animation: pulse 1.2s infinite ease-in-out;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.45; transform: scale(0.84); }
+      50% { opacity: 1; transform: scale(1); }
+    }
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+      .hero-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      .shell { width: min(100vw - 20px, 1480px); margin-top: 10px; }
+      .hero { padding: 20px 18px; border-radius: 24px; }
+      .hero-stats, .lane-grid, .service-grid, .actions-grid, .field-grid, .field-grid.dual { grid-template-columns: 1fr; }
+      .panel-header, .hero-top { flex-direction: column; align-items: flex-start; }
+      .fact { grid-template-columns: 1fr; }
+      h1 { max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="hero-top">
+        <div>
+          <div class="eyebrow"><span class="spinner"></span>LLMCommune Preset Studio</div>
+          <h1>Bakeoff evidence, immutable revisions, one DGX control pane.</h1>
+          <div class="sub">Operate the controller on <code>:8001</code> with published preset revisions, editable drafts, server-owned defaults, and recommendation context grounded in the latest bakeoff evidence.</div>
+        </div>
+        <div class="tiny">
+          <div><strong>API</strong> <code id="apiBaseLabel">same origin</code></div>
+          <div><strong>Updated</strong> <span id="lastRefresh">never</span></div>
+          <div><strong>Desired mode</strong> <span id="desiredModeLabel">unknown</span></div>
+        </div>
+      </div>
+      <div class="hero-stats">
+        <div class="stat">
+          <div class="stat-label">Controller</div>
+          <div class="stat-value" id="controllerState">--</div>
+          <div class="stat-note" id="controllerNote">Waiting for first poll</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Active Revision</div>
+          <div class="stat-value" id="activeSet">--</div>
+          <div class="stat-note" id="activeSetNote">No published preset active</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Published Presets</div>
+          <div class="stat-value" id="publishedCount">0</div>
+          <div class="stat-note" id="publishedNote">Waiting for studio summary</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Drafts</div>
+          <div class="stat-value" id="draftCount">0</div>
+          <div class="stat-note" id="draftNote">No draft activity yet</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="layout">
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Lane Status</div>
+              <div class="panel-meta">Realtime controller view of large, mini, and fleet state.</div>
+            </div>
+            <button class="alt" id="refreshBtn">Refresh Now</button>
+          </div>
+          <div class="panel-body lane-grid" id="laneGrid"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Preset Studio</div>
+              <div class="panel-meta">Draft, publish, apply, and pin immutable preset revisions.</div>
+            </div>
+            <div class="tiny">All studio actions route through the same LLMCommune controller API.</div>
+          </div>
+          <div class="panel-body actions-grid">
+            <div class="action-card">
+              <div class="panel-title" style="font-size:16px">Published Presets</div>
+              <div class="tiny">Apply a published revision, dry-run it, or pin it as the controller default.</div>
+              <div class="field-grid dual" style="margin-top:14px">
+                <select id="studioPresetSelect"><option value="">Select published preset...</option></select>
+                <select id="studioWait"><option value="false">Async</option><option value="true">Wait for ready</option></select>
+              </div>
+              <div class="button-row">
+                <button id="applyPresetBtn">Apply Revision</button>
+                <button class="alt" id="dryRunPresetBtn">Dry Run</button>
+                <button class="alt" id="loadPresetToDraftBtn">Load Into Draft</button>
+              </div>
+              <div class="button-row">
+                <button class="good" id="pinSoloBtn">Pin Solo Default</button>
+                <button class="good" id="pinComboBtn">Pin Combo Default</button>
+                <button class="alt" id="refreshEvidenceBtn">Refresh Evidence</button>
+              </div>
+            </div>
+
+            <div class="action-card">
+              <div class="panel-title" style="font-size:16px">Recommendations</div>
+              <div class="tiny">Compatible bakeoff winners and the defaults currently pinned on the server.</div>
+              <div class="facts" style="margin-top:14px" id="recommendationPanel"></div>
+            </div>
+
+            <div class="action-card" style="grid-column: span 2;">
+              <div class="panel-title" style="font-size:16px">Draft Workshop</div>
+              <div class="tiny">Edit draft intent safely, then publish a new immutable revision when it is ready.</div>
+              <div class="field-grid dual" style="margin-top:14px">
+                <select id="draftSelect"><option value="__new__">New draft...</option></select>
+                <input id="draftPresetId" placeholder="preset_id" />
+              </div>
+              <div class="field-grid dual">
+                <input id="draftDisplayName" placeholder="Display name" />
+                <select id="draftLargeProfile"><option value="">Large lane target...</option></select>
+              </div>
+              <div class="field-grid dual">
+                <select id="draftMiniProfile"><option value="">Mini lane dark...</option></select>
+                <div class="tiny">Leave the mini lane dark for solo presets. Add a mini target to publish a combo revision.</div>
+              </div>
+              <div style="margin-top:10px">
+                <textarea id="draftDescription" placeholder="Draft description and operator notes"></textarea>
+              </div>
+              <div class="button-row">
+                <button id="saveDraftBtn">Save Draft</button>
+                <button class="alt" id="duplicateDraftBtn">Duplicate</button>
+                <button class="good" id="publishDraftBtn">Publish Revision</button>
+                <button class="danger" id="deleteDraftBtn">Delete Draft</button>
+              </div>
+              <div class="footer-note">Publishing never mutates old revisions. It adds a new revision-specific activation set to the controller catalog.</div>
+            </div>
+
+            <div class="action-card">
+              <div class="panel-title" style="font-size:16px">Single Profile</div>
+              <div class="tiny">Target a lane directly when you need a one-off activation outside the preset studio flow.</div>
+              <div class="field-grid" style="margin-top:14px">
+                <select id="profileSelect"><option value="">Select profile...</option></select>
+                <select id="laneSelect"><option value="">Auto lane</option><option value="large">Large</option><option value="mini">Mini</option></select>
+                <button id="activateProfileBtn">Activate</button>
+              </div>
+              <div class="button-row">
+                <button class="alt" id="activateProfileDryBtn">Dry Run</button>
+              </div>
+            </div>
+
+            <div class="action-card">
+              <div class="panel-title" style="font-size:16px">Quick Ops</div>
+              <div class="tiny">High-frequency controller actions and lane maintenance.</div>
+              <div class="button-row">
+                <button class="warn" data-post="/bonzai">Bonzai</button>
+                <button class="good" data-post="/fleet/up">Fleet Up</button>
+                <button class="danger" data-post="/fleet/down">Fleet Down</button>
+                <button class="danger" data-stop="large">Stop Large</button>
+                <button class="danger" data-stop="mini">Stop Mini</button>
+                <button class="danger" data-stop="all">Stop All</button>
+              </div>
+              <div class="field-grid dual" style="margin-top:14px">
+                <select id="restartLane"><option value="large">Large</option><option value="mini">Mini</option></select>
+                <button id="restartLaneBtn">Restart Lane</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Model Inventory</div>
+              <div class="panel-meta">Profiles, launchability, install footprint, and runtime family.</div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Profile</th>
+                    <th>Lane</th>
+                    <th>Model</th>
+                    <th>Runtime</th>
+                    <th>Installed</th>
+                    <th>Status</th>
+                    <th>Blocked By</th>
+                  </tr>
+                </thead>
+                <tbody id="inventoryBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Desired State & Defaults</div>
+              <div class="panel-meta">Live watchdog intent plus the server-owned solo and combo defaults.</div>
+            </div>
+          </div>
+          <div class="panel-body" id="desiredStatePanel"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Published Catalog</div>
+              <div class="panel-meta">Every published revision, with bakeoff signal, lane targets, evidence state, and operator flags.</div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Preset</th>
+                    <th>Target</th>
+                    <th>Mode</th>
+                    <th>Primary Variant</th>
+                    <th>Bakeoff</th>
+                    <th>Flags</th>
+                  </tr>
+                </thead>
+                <tbody id="presetCatalogBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Sister Services</div>
+              <div class="panel-meta">Controller-adjacent services proxied through LLMCommune.</div>
+            </div>
+          </div>
+          <div class="panel-body service-grid" id="serviceGrid"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Logs</div>
+              <div class="panel-meta">Server-backed studio action tail plus browser activity for this page.</div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div style="display:grid; gap:12px;">
+              <div>
+                <div class="panel-meta" style="margin-bottom:8px;">Server action log</div>
+                <div class="log" id="serverLog">Waiting for studio summary...</div>
+              </div>
+              <div>
+                <div class="panel-meta" style="margin-bottom:8px;">Browser log</div>
+                <div class="log" id="eventLog">Preset studio ready. Waiting for first refresh...</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const state = {
+      current: null,
+      modelCatalog: null,
+      activationSets: [],
+      studio: {
+        published_presets: [],
+        catalog: {
+          shelves: {
+            current: { solos: [], combos: [] },
+            promote_next: { solos: [], combos: [] },
+            available_bench: { solos: [], combos: [] },
+          },
+        },
+        drafts: [],
+        defaults: { solo: null, combo: null },
+        recommendations: { solo: null, combo: null },
+        action_log_tail: [],
+      },
+      services: {},
+      preferredDraftId: null,
+      preferredPresetId: null,
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    function stamp(value = Date.now()) {
+      return new Date(value).toLocaleTimeString();
+    }
+
+    function log(message) {
+      const node = $("eventLog");
+      node.textContent += `\n[${stamp()}] ${message}`;
+      node.scrollTop = node.scrollHeight;
+    }
+
+    function showToast(message, type = "info") {
+      const node = $("toast");
+      node.textContent = message;
+      node.style.display = "block";
+      node.style.borderColor = type === "error"
+        ? "rgba(248,113,113,0.4)"
+        : type === "success"
+          ? "rgba(74,222,128,0.4)"
+          : "rgba(96,165,250,0.4)";
+      clearTimeout(node._timer);
+      node._timer = setTimeout(() => { node.style.display = "none"; }, 4200);
+    }
+
+    function chipClass(value) {
+      const label = String(value ?? "").toLowerCase();
+      if (value === true || ["ready", "up", "compatible", "valid", "recommended", "fresh"].includes(label)) return "chip up";
+      if (value === false || ["failed", "down", "stale", "mismatched", "invalid"].includes(label)) return "chip down";
+      if (["starting", "running", "stopping", "busy"].includes(label)) return "chip warn";
+      return "chip idle";
+    }
+
+    function chipLabel(value, fallback = "idle") {
+      if (value === true) return "up";
+      if (value === false) return "down";
+      return String(value || fallback);
+    }
+
+    function formatList(values, empty = "-") {
+      return values && values.length ? values.map((value) => `<code>${value}</code>`).join("<br />") : empty;
+    }
+
+    function formatRevision(value) {
+      return `r${String(Number(value) || 0).padStart(4, "0")}`;
+    }
+
+    function defaultLabel(entry) {
+      if (!entry) return "Not pinned";
+      const validity = entry.valid === false ? "invalid" : "valid";
+      return `<strong>${entry.preset_id}</strong> ${formatRevision(entry.published_revision)}<br /><span class="tiny">${validity}${entry.activation_set_id ? ` · <code>${entry.activation_set_id}</code>` : ""}</span>`;
+    }
+
+    function recommendationLabel(entry) {
+      if (!entry) return "No compatible recommendation right now.";
+      return `<strong>${entry.preset_id}</strong> ${formatRevision(entry.published_revision)}<br /><span class="tiny">${entry.rationale || "Compatible bakeoff winner."}</span>`;
+    }
+
+    function bakeoffLabel(preset) {
+      return preset?.bakeoff_rank != null ? `bakeoff #${preset.bakeoff_rank}` : "no bakeoff rank";
+    }
+
+    function catalogRankLabel(row) {
+      const shelf = String(row?.catalog_shelf || "").replace(/_/g, " ");
+      if (row?.catalog_rank != null) {
+        return `${shelf || "catalog"} #${row.catalog_rank}`;
+      }
+      return shelf || "catalog";
+    }
+
+    function catalogTargetHtml(row) {
+      if (row?.activation_target_id) {
+        return `<code>${row.activation_target_id}</code><br /><span class="tiny">${row.publication_state === "candidate" ? "candidate target" : "published target"}</span>`;
+      }
+      return `<span class="tiny">Not published</span>`;
+    }
+
+    function catalogVariantHtml(row) {
+      const primary = row?.primary_variant || null;
+      const variantBits = [];
+      if (primary?.display_name) variantBits.push(primary.display_name);
+      if (primary?.variant_id) variantBits.push(primary.variant_id.toUpperCase());
+      if (primary?.publication_state === "candidate") variantBits.push("candidate");
+      const counts = [];
+      if (row?.published_variant_count) counts.push(`${row.published_variant_count} published`);
+      if (row?.candidate_variant_count) counts.push(`${row.candidate_variant_count} candidate`);
+      return `<strong>${variantBits.join(" · ") || "-"}</strong>${counts.length ? `<br /><span class="tiny">${counts.join(" · ")}</span>` : ""}`;
+    }
+
+    function presetTargetsHtml(preset) {
+      const targets = preset?.lane_targets || {};
+      return [
+        targets.large ? `large: <code>${targets.large}</code>` : "",
+        Object.prototype.hasOwnProperty.call(targets, "mini")
+          ? (targets.mini ? `mini: <code>${targets.mini}</code>` : "mini: <span class=\"tiny\">dark</span>")
+          : "",
+      ].filter(Boolean).join("<br />") || "-";
+    }
+
+    function selectedPublishedPreset() {
+      const value = $("studioPresetSelect").value;
+      return (state.studio.published_presets || []).find((preset) => preset.activation_set_id === value) || null;
+    }
+
+    function selectedDraft() {
+      const value = $("draftSelect").value;
+      if (!value || value === "__new__") return null;
+      return (state.studio.drafts || []).find((draft) => draft.draft_id === value) || null;
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        ...options,
+      });
+      const text = await response.text();
+      let body = {};
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch {
+        body = { ok: false, detail: text || "invalid json" };
+      }
+      if (!response.ok) {
+        const detail = body.detail || body.code || `${response.status} ${response.statusText}`;
+        throw new Error(detail);
+      }
+      return body;
+    }
+
+    async function postJson(path, payload = {}) {
+      log(`POST ${path}`);
+      const body = await api(path, { method: "POST", body: JSON.stringify(payload) });
+      showToast(body.detail || body.status || body.code || `OK: ${path}`, body.ok === false || body.accepted === false ? "error" : "success");
+      if (body.job_id) log(`job=${body.job_id}`);
+      return body;
+    }
+
+    function laneCardHtml(title, lane) {
+      const up = Boolean(lane?.up);
+      const profileId = lane?.profile_id || "idle";
+      const modelId = lane?.model_id || (lane?.model_ids || [])[0] || "-";
+      const runtime = lane?.runtime_family || "unknown";
+      const host = lane?.host_display_name || lane?.host_id || "-";
+      return `
+        <article class="lane-card">
+          <div class="lane-top">
+            <div>
+              <div class="lane-name">${title}</div>
+              <div class="tiny">${host} · <code>${lane?.base_url || "-"}</code></div>
+            </div>
+            <div class="${chipClass(up)}">${chipLabel(up)}</div>
+          </div>
+          <div class="facts">
+            <div class="fact"><div class="fact-label">Profile</div><div class="fact-value"><strong>${profileId}</strong></div></div>
+            <div class="fact"><div class="fact-label">Model</div><div class="fact-value"><code>${modelId}</code></div></div>
+            <div class="fact"><div class="fact-label">Runtime</div><div class="fact-value">${runtime}</div></div>
+            <div class="fact"><div class="fact-label">Model IDs</div><div class="fact-value">${formatList(lane?.model_ids || [])}</div></div>
+            <div class="fact"><div class="fact-label">Adapter</div><div class="fact-value">${lane?.adapter?.protocol || "-"}</div></div>
+          </div>
+        </article>`;
+    }
+
+    function fleetCardHtml(fleet) {
+      const members = (fleet?.members || []).map((member) => `
+        <div class="fact">
+          <div class="fact-label">${member.member_id}</div>
+          <div class="fact-value">${member.up ? "yes" : "no"} <code>${member.model_id || "-"}</code><br /><span class="tiny">${member.host_display_name || member.host_id} · ${member.base_url || "-"}</span></div>
+        </div>`).join("");
+      return `
+        <article class="lane-card" style="grid-column: span 2;">
+          <div class="lane-top">
+            <div>
+              <div class="lane-name">Mini Fleet</div>
+              <div class="tiny">${fleet?.display_name || fleet?.fleet_id || "No fleet configured"}</div>
+            </div>
+            <div class="${chipClass(Boolean(fleet?.up))}">${chipLabel(Boolean(fleet?.up))}</div>
+          </div>
+          <div class="facts">
+            <div class="fact"><div class="fact-label">Fleet ID</div><div class="fact-value">${fleet?.fleet_id || "-"}</div></div>
+            <div class="fact"><div class="fact-label">Mode</div><div class="fact-value">${fleet?.mode || "-"}</div></div>
+            ${members || `<div class="fact"><div class="fact-label">Members</div><div class="fact-value">No members reported.</div></div>`}
+          </div>
+        </article>`;
+    }
+
+    function syncSelect(node, html, fallback = "") {
+      const previous = node.value;
+      node.innerHTML = html;
+      if ([...node.options].some((option) => option.value === previous)) {
+        node.value = previous;
+      } else {
+        node.value = fallback;
+      }
+    }
+
+    function fillDraftForm(draft) {
+      $("draftPresetId").value = draft?.preset_id || "";
+      $("draftDisplayName").value = draft?.display_name || "";
+      $("draftDescription").value = draft?.description || "";
+      $("draftLargeProfile").value = draft?.lane_targets?.large || "";
+      $("draftMiniProfile").value = draft?.lane_targets?.mini || "";
+    }
+
+    function loadDraftSelection(silent = false) {
+      const draft = selectedDraft();
+      if (!draft) {
+        fillDraftForm(null);
+        return;
+      }
+      fillDraftForm(draft);
+      if (!silent) {
+        log(`Loaded draft ${draft.draft_id}`);
+      }
+    }
+
+    function loadSelectedPresetIntoDraft() {
+      const preset = selectedPublishedPreset();
+      if (!preset) {
+        showToast("Choose a published preset first.", "error");
+        return;
+      }
+      $("draftSelect").value = "__new__";
+      fillDraftForm({
+        preset_id: preset.preset_id,
+        display_name: preset.display_name,
+        description: preset.description,
+        lane_targets: preset.lane_targets,
+      });
+      log(`Loaded ${preset.preset_id} ${formatRevision(preset.published_revision)} into draft form`);
+      showToast(`Loaded ${preset.preset_id} into the draft editor.`, "success");
+    }
+
+    function collectDraftPayload() {
+      const presetId = $("draftPresetId").value.trim();
+      const displayName = $("draftDisplayName").value.trim();
+      const description = $("draftDescription").value.trim();
+      const large = $("draftLargeProfile").value || null;
+      const mini = $("draftMiniProfile").value || null;
+      if (!presetId) {
+        throw new Error("preset_id is required");
+      }
+      if (!large && !mini) {
+        throw new Error("Choose at least one lane target");
+      }
+      return {
+        preset_id: presetId,
+        display_name: displayName || presetId,
+        description,
+        lane_targets: { large, mini },
+      };
+    }
+
+    function renderHero() {
+      const current = state.current || {};
+      const studio = state.studio || {};
+      const published = studio.published_presets || [];
+      const active = published.find((preset) => preset.currently_active) || null;
+      $("apiBaseLabel").textContent = current.controller?.base_url || window.location.origin;
+      $("lastRefresh").textContent = stamp();
+      $("desiredModeLabel").textContent = current.desired_state?.mode || "unknown";
+      $("controllerState").textContent = current.activating ? "Busy" : (current.ok ? "Healthy" : "Degraded");
+      $("controllerNote").textContent = current.activating
+        ? `activating ${current.activating_set_id || "preset"}`
+        : `${current.controller?.name || "controller"} on ${current.controller?.port || 4000}`;
+      $("activeSet").textContent = active
+        ? `${active.preset_id} ${formatRevision(active.published_revision)}`
+        : (current.desired_state?.active_set_id || "-");
+      $("activeSetNote").textContent = current.desired_state?.status_detail || (active ? active.activation_set_id : "No published preset pinned");
+      $("publishedCount").textContent = String(published.filter((preset) => preset.latest_for_preset).length);
+      $("publishedNote").textContent = `${published.length} total revisions catalogued`;
+      $("draftCount").textContent = String((studio.drafts || []).length);
+      $("draftNote").textContent = studio.evidence_stale
+        ? "Evidence source missing; recommendations suppressed"
+        : studio.evidence_generated_at
+          ? `Evidence refreshed ${studio.evidence_generated_at}`
+          : "No evidence snapshot yet";
+    }
+
+    function renderCurrent() {
+      const current = state.current;
+      if (!current) return;
+      $("laneGrid").innerHTML = [
+        laneCardHtml("Large Lane · :8000", current.lanes?.large || {}),
+        laneCardHtml("Mini Lane · :7999", current.lanes?.mini || {}),
+        fleetCardHtml(current.mini_fleet || {}),
+      ].join("");
+    }
+
+    function renderDesiredState() {
+      const current = state.current || {};
+      const desired = current.desired_state || {};
+      const defaults = state.studio.defaults || {};
+      const recommendations = state.studio.recommendations || {};
+      const evidenceSources = state.studio.evidence_sources || [];
+      const presentSource = evidenceSources.find((source) => source.present);
+      $("desiredStatePanel").innerHTML = `
+        <div class="action-card">
+          <div class="facts">
+            <div class="fact"><div class="fact-label">Mode</div><div class="fact-value"><span class="${chipClass(desired.mode)}">${chipLabel(desired.mode)}</span></div></div>
+            <div class="fact"><div class="fact-label">State</div><div class="fact-value"><span class="${chipClass(desired.state)}">${chipLabel(desired.state)}</span></div></div>
+            <div class="fact"><div class="fact-label">Watchdog</div><div class="fact-value">${desired.watchdog_enforce ? "enforcing" : "idle"}</div></div>
+            <div class="fact"><div class="fact-label">Large target</div><div class="fact-value"><code>${desired.lane_targets?.large || "-"}</code></div></div>
+            <div class="fact"><div class="fact-label">Mini target</div><div class="fact-value"><code>${desired.lane_targets?.mini || "-"}</code></div></div>
+            <div class="fact"><div class="fact-label">Active set id</div><div class="fact-value"><code>${desired.active_set_id || "-"}</code></div></div>
+            <div class="fact"><div class="fact-label">Solo default</div><div class="fact-value">${defaultLabel(defaults.solo)}</div></div>
+            <div class="fact"><div class="fact-label">Combo default</div><div class="fact-value">${defaultLabel(defaults.combo)}</div></div>
+            <div class="fact"><div class="fact-label">Solo recommendation</div><div class="fact-value">${recommendationLabel(recommendations.solo)}</div></div>
+            <div class="fact"><div class="fact-label">Combo recommendation</div><div class="fact-value">${recommendationLabel(recommendations.combo)}</div></div>
+            <div class="fact"><div class="fact-label">Evidence</div><div class="fact-value"><span class="${chipClass(state.studio.evidence_stale ? "stale" : "fresh")}">${state.studio.evidence_stale ? "stale" : "fresh"}</span><br /><span class="tiny">${presentSource ? presentSource.path : "No scoreboard source detected"}</span></div></div>
+            <div class="fact"><div class="fact-label">Status</div><div class="fact-value">${desired.status_detail || "No extra detail"}</div></div>
+          </div>
+        </div>`;
+    }
+
+    function renderCatalog() {
+      const catalog = state.modelCatalog || {};
+      const profiles = catalog.profiles || [];
+      $("inventoryBody").innerHTML = profiles.map((profile) => `
+        <tr>
+          <td><strong>${profile.display_name || profile.profile_id}</strong><br /><code>${profile.profile_id}</code></td>
+          <td>${profile.default_lane || "-"}</td>
+          <td><code>${profile.model_id || "-"}</code></td>
+          <td>${profile.runtime_family || "-"}</td>
+          <td>${profile.installed_on || "-"}</td>
+          <td>${profile.current_status || (profile.launchable_now ? "launchable" : "idle")}</td>
+          <td>${(profile.blocked_by || []).length ? (profile.blocked_by || []).map((item) => `<code>${item}</code>`).join("<br />") : "-"}</td>
+        </tr>`).join("");
+
+      const directProfileOptions = `<option value="">Select profile...</option>` + profiles.map((profile) =>
+        `<option value="${profile.profile_id}">${profile.display_name || profile.profile_id} · ${profile.runtime_family || "unknown"}</option>`
+      ).join("");
+      syncSelect($("profileSelect"), directProfileOptions, "");
+
+      const largeProfiles = profiles.filter((profile) => (profile.allowed_lanes || []).includes("large") || profile.default_lane === "large");
+      const miniProfiles = profiles.filter((profile) => (profile.allowed_lanes || []).includes("mini") || profile.default_lane === "mini");
+      syncSelect($("draftLargeProfile"), `<option value="">Large lane target...</option>` + largeProfiles.map((profile) =>
+        `<option value="${profile.profile_id}">${profile.display_name || profile.profile_id}</option>`
+      ).join(""), "");
+      syncSelect($("draftMiniProfile"), `<option value="">Mini lane dark...</option>` + miniProfiles.map((profile) =>
+        `<option value="${profile.profile_id}">${profile.display_name || profile.profile_id}</option>`
+      ).join(""), "");
+    }
+
+    function renderStudioControls() {
+      const published = (state.studio.published_presets || []).slice();
+      const presetSelect = $("studioPresetSelect");
+      const presetPreferred = state.preferredPresetId !== null ? state.preferredPresetId : presetSelect.value;
+      presetSelect.innerHTML = `<option value="">Select published preset...</option>` + published.map((preset) => {
+        const tags = [
+          preset.bakeoff_rank != null ? `#${preset.bakeoff_rank}` : null,
+          formatRevision(preset.published_revision),
+          preset.mode,
+          preset.latest_for_preset ? "latest" : "history",
+        ].filter(Boolean).join(" · ");
+        return `<option value="${preset.activation_set_id}">${preset.display_name || preset.preset_id} · ${tags}</option>`;
+      }).join("");
+      presetSelect.value = [...presetSelect.options].some((option) => option.value === presetPreferred) ? presetPreferred : "";
+      state.preferredPresetId = null;
+
+      const drafts = state.studio.drafts || [];
+      const draftSelect = $("draftSelect");
+      const draftPreferred = state.preferredDraftId !== null ? state.preferredDraftId : draftSelect.value;
+      draftSelect.innerHTML = `<option value="__new__">New draft...</option>` + drafts.map((draft) =>
+        `<option value="${draft.draft_id}">${draft.display_name || draft.preset_id} · rev ${draft.draft_revision}</option>`
+      ).join("");
+      draftSelect.value = [...draftSelect.options].some((option) => option.value === draftPreferred) ? draftPreferred : "__new__";
+
+      const defaults = state.studio.defaults || {};
+      const recommendations = state.studio.recommendations || {};
+      $("recommendationPanel").innerHTML = `
+        <div class="fact"><div class="fact-label">Solo default</div><div class="fact-value">${defaultLabel(defaults.solo)}</div></div>
+        <div class="fact"><div class="fact-label">Combo default</div><div class="fact-value">${defaultLabel(defaults.combo)}</div></div>
+        <div class="fact"><div class="fact-label">Solo winner</div><div class="fact-value">${recommendationLabel(recommendations.solo)}</div></div>
+        <div class="fact"><div class="fact-label">Combo winner</div><div class="fact-value">${recommendationLabel(recommendations.combo)}</div></div>
+        <div class="fact"><div class="fact-label">Evidence freshness</div><div class="fact-value"><span class="${chipClass(state.studio.evidence_stale ? "stale" : "fresh")}">${state.studio.evidence_stale ? "stale" : "fresh"}</span><br /><span class="tiny">${state.studio.evidence_generated_at || "No evidence snapshot yet"}</span></div></div>`;
+
+      const serverEntries = state.studio.action_log_tail || [];
+      $("serverLog").textContent = serverEntries.length
+        ? serverEntries.map((entry) => {
+          const summary = [
+            entry.action || "event",
+            entry.preset_id || "",
+            entry.published_revision != null ? formatRevision(entry.published_revision) : "",
+            entry.draft_id || "",
+          ].filter(Boolean).join(" · ");
+          return `[${stamp(entry.ts || Date.now())}] ${summary}`;
+        }).join("\n")
+        : "No studio actions yet.";
+
+      const shouldLoadDraft = state.preferredDraftId !== null;
+      state.preferredDraftId = null;
+      if (shouldLoadDraft) {
+        loadDraftSelection(true);
+      }
+    }
+
+    function renderPresetCatalog() {
+      const catalog = state.studio.catalog || {};
+      const shelves = catalog.shelves || {};
+      const sections = [
+        ["Current Solos", shelves.current?.solos || []],
+        ["Current Combos", shelves.current?.combos || []],
+        ["Promote Next Solos", shelves.promote_next?.solos || []],
+        ["Promote Next Combos", shelves.promote_next?.combos || []],
+        ["Available Bench Solos", shelves.available_bench?.solos || []],
+        ["Available Bench Combos", shelves.available_bench?.combos || []],
+      ];
+      const html = sections
+        .filter(([, rows]) => rows.length)
+        .map(([title, rows]) => {
+          const body = rows.map((row) => {
+            const flags = [
+              row.publication_state === "candidate" ? "candidate" : "published",
+              row.recommendation_state && row.recommendation_state !== "current" ? row.recommendation_state.replace(/_/g, " ") : "",
+              row.default_selected ? "default" : "",
+              row.recommended ? "recommended" : "",
+              row.currently_active ? "active" : "",
+              row.aliases?.length ? `aliases: ${row.aliases.join(", ")}` : "",
+            ].filter(Boolean).join(" · ") || "-";
+            const evidence = [
+              row.quality_label || row.quality_score || "?",
+              row.tokens_per_second != null ? `${row.tokens_per_second} tok/s` : null,
+              row.spinup_seconds != null ? `${row.spinup_seconds}s spin-up` : null,
+            ].filter(Boolean).join(" · ") || "No matched evidence";
+            const matchedModel = row.matched_model
+              ? `<br /><span class="tiny"><code>${row.matched_model}</code></span>`
+              : "";
+            return `
+              <tr>
+                <td><strong>${row.display_name || row.catalog_entry_id}</strong><br /><span class="tiny">${catalogRankLabel(row)}</span><br /><code>${row.catalog_entry_id}</code></td>
+                <td>${catalogTargetHtml(row)}</td>
+                <td>${row.entry_type || row.mode || "-"}</td>
+                <td>${catalogVariantHtml(row)}</td>
+                <td><span class="${chipClass(row.evidence_status)}">${chipLabel(row.evidence_status, "unknown")}</span><br /><span class="tiny">${evidence}</span>${matchedModel}</td>
+                <td>${flags}<br /><span class="tiny">${row.why_ranked_here || row.operator_action_hint || ""}</span></td>
+              </tr>`;
+          }).join("");
+          return `<tr><th colspan="6">${title}</th></tr>${body}`;
+        })
+        .join("");
+      $("presetCatalogBody").innerHTML = html || `<tr><td colspan="6">No ranked catalog entries yet.</td></tr>`;
+    }
+
+    function renderServices() {
+      const services = state.services || {};
+      const rows = [
+        { key: "alpha", title: "Alpha · :4001" },
+        { key: "alpha-gamenator", title: "Alpha-Gamenator · :4002" },
+      ];
+      $("serviceGrid").innerHTML = rows.map(({ key, title }) => {
+        const entry = services[key];
+        const up = Boolean(entry?.ok === true || entry?.status === "ok");
+        const note = entry
+          ? Object.entries(entry).slice(0, 4).map(([itemKey, value]) => `${itemKey}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`).join("<br />")
+          : "No data";
+        return `
+          <article class="service-card">
+            <div class="service-top">
+              <div>
+                <div class="service-name">${title}</div>
+                <div class="tiny">proxied via LLMCommune</div>
+              </div>
+              <div class="${chipClass(entry ? up : false)}">${entry ? chipLabel(up) : "offline"}</div>
+            </div>
+            <div class="tiny">${note}</div>
+          </article>`;
+      }).join("");
+    }
+
+    async function refreshServices() {
+      const targets = [
+        ["alpha", "/api/services/alpha/health"],
+        ["alpha-gamenator", "/api/services/alpha-gamenator/health"],
+      ];
+      const results = await Promise.allSettled(targets.map(async ([key, path]) => [key, await api(path)]));
+      state.services = {};
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          const [key, payload] = result.value;
+          state.services[key] = payload;
+        }
+      }
+      renderServices();
+    }
+
+    async function refreshAll(silent = false) {
+      if (!silent) log("Refreshing preset studio");
+      const [health, summary] = await Promise.all([
+        api("/health"),
+        api("/api/llm-host/studio/summary"),
+      ]);
+      state.current = summary.current;
+      state.modelCatalog = summary.models;
+      state.activationSets = summary.activation_sets || [];
+      state.studio = summary.studio || state.studio;
+      renderHero();
+      renderCurrent();
+      renderDesiredState();
+      renderCatalog();
+      renderStudioControls();
+      renderPresetCatalog();
+      await refreshServices();
+      if (!health.ok) {
+        $("controllerState").textContent = "Degraded";
+      }
+      if (!silent) log("Refresh complete");
+    }
+
+    async function applyPreset(dryRun = false) {
+      const preset = selectedPublishedPreset();
+      if (!preset) {
+        showToast("Choose a published preset first.", "error");
+        return;
+      }
+      const body = await postJson("/api/llm-host/studio/apply", {
+        activation_set_id: preset.activation_set_id,
+        wait: $("studioWait").value === "true",
+        dry_run: dryRun,
+      });
+      log(`${dryRun ? "Dry run" : "Apply"} ${preset.preset_id} ${formatRevision(preset.published_revision)}: ${body.detail || body.status || "accepted"}`);
+      state.preferredPresetId = preset.activation_set_id;
+      setTimeout(() => refreshAll(true).catch((error) => log(`refresh failed: ${error.message}`)), dryRun ? 400 : 1800);
+    }
+
+    async function pinDefault(mode) {
+      const preset = selectedPublishedPreset();
+      if (!preset) {
+        showToast("Choose a published preset first.", "error");
+        return;
+      }
+      await postJson("/api/llm-host/studio/defaults/set", {
+        mode,
+        activation_set_id: preset.activation_set_id,
+      });
+      log(`Pinned ${preset.preset_id} ${formatRevision(preset.published_revision)} as ${mode} default`);
+      state.preferredPresetId = preset.activation_set_id;
+      await refreshAll(true);
+    }
+
+    async function refreshEvidence() {
+      await postJson("/api/llm-host/studio/recommendations/refresh", {});
+      log("Studio evidence refresh requested");
+      await refreshAll(true);
+    }
+
+    async function saveDraft() {
+      const payload = collectDraftPayload();
+      const draft = selectedDraft();
+      if (draft) {
+        payload.draft_id = draft.draft_id;
+        payload.expected_draft_revision = draft.draft_revision;
+      }
+      const body = await postJson("/api/llm-host/studio/drafts/save", payload);
+      state.preferredDraftId = body.draft?.draft_id || "__new__";
+      log(`Saved draft ${body.draft?.draft_id || payload.preset_id}`);
+      await refreshAll(true);
+    }
+
+    async function duplicateDraft() {
+      const draft = selectedDraft();
+      if (!draft) {
+        showToast("Load a saved draft before duplicating it.", "error");
+        return;
+      }
+      const body = await postJson("/api/llm-host/studio/drafts/duplicate", {
+        draft_id: draft.draft_id,
+        preset_id: $("draftPresetId").value.trim(),
+        display_name: $("draftDisplayName").value.trim(),
+      });
+      state.preferredDraftId = body.draft?.draft_id || "__new__";
+      log(`Duplicated draft ${draft.draft_id}`);
+      await refreshAll(true);
+    }
+
+    async function publishDraft() {
+      const draft = selectedDraft();
+      if (!draft) {
+        showToast("Save the draft first so the server can publish it safely.", "error");
+        return;
+      }
+      const body = await postJson("/api/llm-host/studio/drafts/publish", {
+        draft_id: draft.draft_id,
+        expected_draft_revision: draft.draft_revision,
+        persist: true,
+      });
+      state.preferredPresetId = body.activation_set_id || null;
+      log(`Published ${body.preset_id} ${formatRevision(body.published_revision)}`);
+      await refreshAll(true);
+    }
+
+    async function deleteDraft() {
+      const draft = selectedDraft();
+      if (!draft) {
+        showToast("Choose a saved draft first.", "error");
+        return;
+      }
+      await postJson("/api/llm-host/studio/drafts/delete", {
+        draft_id: draft.draft_id,
+        expected_draft_revision: draft.draft_revision,
+      });
+      state.preferredDraftId = "__new__";
+      fillDraftForm(null);
+      log(`Deleted draft ${draft.draft_id}`);
+      await refreshAll(true);
+    }
+
+    async function activateProfile(dryRun = false) {
+      const profileId = $("profileSelect").value;
+      if (!profileId) {
+        showToast("Choose a profile first.", "error");
+        return;
+      }
+      const laneId = $("laneSelect").value;
+      const body = await postJson("/api/llm-host/activate", {
+        profile_id: profileId,
+        lane_id: laneId || undefined,
+        dry_run: dryRun,
+      });
+      log(`${dryRun ? "Dry run" : "Activation"} for profile ${profileId}: ${body.detail || body.status || "accepted"}`);
+      setTimeout(() => refreshAll(true).catch((error) => log(`refresh failed: ${error.message}`)), dryRun ? 400 : 1800);
+    }
+
+    async function stopLane(laneId) {
+      const body = await postJson("/api/llm-host/actions/stop", { lane_id: laneId });
+      log(`Stop ${laneId}: ${body.detail || body.status || "accepted"}`);
+      setTimeout(() => refreshAll(true).catch((error) => log(`refresh failed: ${error.message}`)), 1800);
+    }
+
+    async function restartLane() {
+      const laneId = $("restartLane").value;
+      const body = await postJson("/api/llm-host/actions/restart", { lane_id: laneId });
+      log(`Restart ${laneId}: ${body.detail || body.status || "accepted"}`);
+      setTimeout(() => refreshAll(true).catch((error) => log(`refresh failed: ${error.message}`)), 1800);
+    }
+
+    $("refreshBtn").addEventListener("click", () => refreshAll().catch((error) => {
+      log(`refresh failed: ${error.message}`);
+      showToast(error.message, "error");
+    }));
+    $("applyPresetBtn").addEventListener("click", () => applyPreset(false).catch((error) => { log(error.message); showToast(error.message, "error"); }));
+    $("dryRunPresetBtn").addEventListener("click", () => applyPreset(true).catch((error) => { log(error.message); showToast(error.message, "error"); }));
+    $("pinSoloBtn").addEventListener("click", () => pinDefault("solo").catch((error) => { log(error.message); showToast(error.message, "error"); }));
+    $("pinComboBtn").addEventListener("click", () => pinDefault("combo").catch((error) => { log(error.message); showToast(error.message, "error"); }));
+    $("refreshEvidenceBtn").addEventListener("click", () => refreshEvidence().catch((error) => { log(error.message); showToast(error.message, "error"); }));
+    $("loadPresetToDraftBtn").addEventListener("click", () => {
+      try {
+        loadSelectedPresetIntoDraft();
+      } catch (error) {
+        log(error.message);
+        showToast(error.message, "error");
+      }
+    });
+    $("draftSelect").addEventListener("change", () => loadDraftSelection());
+    $("saveDraftBtn").addEventListener("click", () => saveDraft().catch((error) => { log(error.message); showToast(error.message, "error"); }));
+    $("duplicateDraftBtn").addEventListener("click", () => duplicateDraft().catch((error) => { log(error.message); showToast(error.message, "error"); }));
+    $("publishDraftBtn").addEventListener("click", () => publishDraft().catch((error) => { log(error.message); showToast(error.message, "error"); }));
+    $("deleteDraftBtn").addEventListener("click", () => deleteDraft().catch((error) => { log(error.message); showToast(error.message, "error"); }));
+    $("activateProfileBtn").addEventListener("click", () => activateProfile(false).catch((error) => { log(error.message); showToast(error.message, "error"); }));
+    $("activateProfileDryBtn").addEventListener("click", () => activateProfile(true).catch((error) => { log(error.message); showToast(error.message, "error"); }));
+    $("restartLaneBtn").addEventListener("click", () => restartLane().catch((error) => { log(error.message); showToast(error.message, "error"); }));
+
+    document.querySelectorAll("[data-post]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        try {
+          const path = button.getAttribute("data-post");
+          const body = await postJson(path, {});
+          log(`${path}: ${body.detail || body.status || "accepted"}`);
+          setTimeout(() => refreshAll(true).catch((error) => log(`refresh failed: ${error.message}`)), 1800);
+        } catch (error) {
+          log(error.message);
+          showToast(error.message, "error");
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-stop]").forEach((button) => {
+      button.addEventListener("click", () => stopLane(button.getAttribute("data-stop")).catch((error) => {
+        log(error.message);
+        showToast(error.message, "error");
+      }));
+    });
+
+    refreshAll().catch((error) => {
+      log(`initial refresh failed: ${error.message}`);
+      showToast(error.message, "error");
+    });
+    setInterval(() => refreshAll(true).catch((error) => log(`background refresh failed: ${error.message}`)), 10000);
+  </script>
+</body>
+</html>
