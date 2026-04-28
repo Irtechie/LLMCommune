@@ -807,6 +807,62 @@ trackedTest("activateSet classifies known-idle pre-launch failure as failed_know
   }
 });
 
+trackedTest("activateSet keeps dual-box launch failures in reconcile_needed when startup evidence remains", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    const startupStatePath = path.join(fixture.repoRoot, "workspace", "jobs", "_lanes", "qwen235", "startup-state-8000.json");
+    await writeFile(
+      path.join(fixture.repoRoot, "workspace", "jobs", "_lanes", "active_slot.json"),
+      `${JSON.stringify({
+        slot_label: "qwen235",
+        port: 8000,
+        model_spec: "/mnt/models/nvidia/Qwen3-235B-A22B-NVFP4/files",
+        startup_state_path: startupStatePath,
+      }, null, 2)}\n`,
+      "utf-8",
+    );
+    await writeFile(
+      startupStatePath,
+      `${JSON.stringify({
+        status: "api_not_ready",
+        detail: "waiting for API readiness probe 3/600",
+      }, null, 2)}\n`,
+      "utf-8",
+    );
+
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          if (command.includes("PORT=") && !command.includes("stop_")) {
+            return { ok: false, stdout: "", stderr: "launcher boom", error: "launcher boom" };
+          }
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: false, model_ids: [], raw: null },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+        uuid: () => "job-failed-dual-evidence",
+      },
+    });
+
+    const result = await runtime.activateSet({ setId: "qwen235", wait: true });
+    const current = await runtime.getCurrent();
+
+    assert.equal(result.status, "failed");
+    assert.equal(current.swap.state, "reconcile_needed");
+    assert.equal(current.swap.terminal_state, "reconcile_needed");
+    assert.equal(current.swap.known_idle, false);
+    assert.equal(current.swap.reconcile_needed, true);
+    assert.equal(current.swap.evidence_status, "managed_launcher");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 trackedTest("activateSet rejects dual-box launch when parity preflight fails before teardown", async () => {
   const fixture = await createRepoFixture();
   try {

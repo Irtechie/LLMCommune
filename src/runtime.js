@@ -628,11 +628,31 @@ export function createRuntime({
     return fallback;
   }
 
+  function laneHasManagedStartupEvidence(lane) {
+    const startupStatus = String(lane?.startup_state?.status || "").trim().toLowerCase();
+    return new Set([
+      "starting",
+      "worker_container_started",
+      "primary_container_started",
+      "worker_ssh_not_ready",
+      "worker_ssh_ready",
+      "launch_submitted",
+      "api_wait",
+      "api_not_ready",
+      "post_ready_grace",
+      "post_ready_validation_failed",
+      "process_died_after_bind",
+      "server_launch_failed",
+    ]).has(startupStatus);
+  }
+
   function classifySwapFailureState({ current, failureCode = "", failureDetail = "" } = {}) {
     const largeUp = Boolean(current?.lanes?.large?.up);
     const miniUp = Boolean(current?.lanes?.mini?.up);
     const fleetUp = Boolean(current?.mini_fleet?.up);
-    const knownIdle = !largeUp && !miniUp && !fleetUp;
+    const largeManagedEvidence = laneHasManagedStartupEvidence(current?.lanes?.large);
+    const miniManagedEvidence = laneHasManagedStartupEvidence(current?.lanes?.mini);
+    const knownIdle = !largeUp && !miniUp && !fleetUp && !largeManagedEvidence && !miniManagedEvidence;
     return {
       eventType: knownIdle ? "swap_failed_known_idle" : "swap_reconcile_needed",
       state: knownIdle ? "failed_known_idle" : "reconcile_needed",
@@ -640,7 +660,7 @@ export function createRuntime({
       readiness_status: "failed",
       known_idle: knownIdle,
       reconcile_needed: !knownIdle,
-      evidence_status: "minimal",
+      evidence_status: largeManagedEvidence || miniManagedEvidence ? "managed_launcher" : "minimal",
       observed_lane_targets: observedLaneTargetsFromPayloads(current?.lanes?.large, current?.lanes?.mini),
       failure_code: failureCode || ErrorCode.INTERNAL_ERROR,
       failure_detail: failureDetail || "activation failed",
@@ -725,6 +745,7 @@ export function createRuntime({
       ? observedLaneTargetsFromPayloads(largePayload, miniPayload)
       : normalized.observed_lane_targets;
     const activeTransitionStates = new Set(["preflight", "stopping", "drained", "starting"]);
+    const lingeringManagedEvidence = laneHasManagedStartupEvidence(largePayload) || laneHasManagedStartupEvidence(miniPayload);
     const inferredKnownIdle = !activeTransitionStates.has(String(normalized.state || "").trim().toLowerCase())
       && !Boolean(largePayload?.up || miniPayload?.up || fleet?.up);
     const actionContract = buildSwapActionContract(normalized);
@@ -735,7 +756,7 @@ export function createRuntime({
       activating: _activating,
       activating_set_id: _activating ? _activatingSetId || null : null,
       observed_lane_targets: observed,
-      known_idle: Boolean(normalized.known_idle) || (!_activating && inferredKnownIdle),
+      known_idle: Boolean(normalized.known_idle) || (!_activating && inferredKnownIdle && !lingeringManagedEvidence),
       last_observed_at: currentIso(),
       ...actionContract,
     };
@@ -1157,6 +1178,7 @@ export function createRuntime({
       modelSpec: slotRecord?.model_spec || "",
       probeModelIds: probe.model_ids,
     });
+    const startupState = await readJsonImpl(String(slotRecord?.startup_state_path || ""), null);
     return {
       lane_id: "large",
       up: probe.up,
@@ -1166,6 +1188,7 @@ export function createRuntime({
       model_ids: probe.model_ids,
       profile: profile || null,
       slot_label: slotLabel,
+      startup_state: startupState,
     };
   }
 
@@ -1189,6 +1212,7 @@ export function createRuntime({
       modelSpec: slotRecord?.model_spec || "",
       probeModelIds: probe.model_ids,
     });
+    const startupState = await readJsonImpl(String(slotRecord?.startup_state_path || ""), null);
     return {
       lane_id: "mini",
       up: probe.up,
@@ -1198,6 +1222,7 @@ export function createRuntime({
       model_ids: probe.model_ids,
       profile: profile || null,
       slot_label: String(slotRecord?.slot_label || "").trim(),
+      startup_state: startupState,
     };
   }
 
@@ -1597,6 +1622,8 @@ export function createRuntime({
       profile_id: profile?.profile_id || "",
       display_name: profile?.display_name || "",
       model_id: profile?.model_id || (modelIds[0] || ""),
+      slot_label: String(laneState?.slot_label || "").trim(),
+      startup_state: laneState?.startup_state || null,
       runtime_family: profile?.runtime_family || "unknown",
       host_type: profile ? hostTypeForProfile(profile) : callTarget.host_type,
       host_pattern: profile ? hostPatternForProfile(config, profile) : callTarget.host_pattern,
