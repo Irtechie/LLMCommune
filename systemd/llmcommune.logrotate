@@ -1,0 +1,14 @@
+# logrotate config for LLMCommune controller and watchdog logs
+# Install: sudo cp systemd/llmcommune.logrotate /etc/logrotate.d/llmcommune
+
+/home/admin/apps/LLMCommune/workspace/runtime/controller-4000.log
+/home/admin/apps/LLMCommune/workspace/runtime/watchdog-4000.log {
+    su admin admin
+    size 50M
+    rotate 3
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

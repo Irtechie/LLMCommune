@@ -31,6 +31,36 @@ export const LaneState = Object.freeze({
 /** 120 s grace period — watchdog does not act during lane startup. */
 const STARTING_GRACE_MS = 120_000;
 
+function swapAllowsAction(currentState, actionName) {
+  const swap = currentState?.swap;
+  if (!swap) return true;
+  const policyState = String(swap?.action_policy_state || "").trim().toLowerCase();
+  const reconcileNeeded = Boolean(
+    swap?.reconcile_needed || String(swap?.swap_terminal_state || "").trim().toLowerCase() === "reconcile_needed",
+  );
+  if (!reconcileNeeded && (!policyState || policyState === "normal")) {
+    return true;
+  }
+  const blockedActions = new Set(
+    (Array.isArray(swap?.blocked_actions) ? swap.blocked_actions : [])
+      .map((entry) => typeof entry === "string" ? entry : entry?.action)
+      .map((entry) => String(entry || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+  if (blockedActions.has(actionName)) {
+    return false;
+  }
+  const allowedActions = new Set(
+    (Array.isArray(swap?.allowed_actions) ? swap.allowed_actions : [])
+      .map((entry) => String(entry || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+  if (allowedActions.size > 0) {
+    return allowedActions.has(actionName);
+  }
+  return false;
+}
+
 export function planWatchdogActions({ desiredState, currentState }) {
   if (!watchdogEnabledForDesiredState(desiredState)) {
     return [];
@@ -42,7 +72,7 @@ export function planWatchdogActions({ desiredState, currentState }) {
   }
 
   if (desiredState.mode === "fleet" && desiredState.fleet_id) {
-    if (!currentState?.mini_fleet?.up) {
+    if (!currentState?.mini_fleet?.up && swapAllowsAction(currentState, "fleet_up")) {
       return [
         {
           key: `fleet:${desiredState.fleet_id}`,
@@ -57,45 +87,66 @@ export function planWatchdogActions({ desiredState, currentState }) {
 
   const actions = [];
   const darkStates = desiredState.lane_dark_states || {};
+  const desiredSetId = String(desiredState?.active_set_id || "").trim();
   const largeTarget = String(desiredState?.lane_targets?.large || "").trim();
   const miniTarget = String(desiredState?.lane_targets?.mini || "").trim();
   const largeCurrent = currentState?.lanes?.large || {};
   const miniCurrent = currentState?.lanes?.mini || {};
+  const largeState = largeTarget ? _classifyLane(largeCurrent, largeTarget) : LaneState.READY;
+  const miniState = miniTarget ? _classifyLane(miniCurrent, miniTarget) : LaneState.READY;
+  const largeNeedsRestore = Boolean(largeTarget) && !darkStates.large
+    && largeState !== LaneState.READY
+    && largeState !== LaneState.STARTING
+    && largeState !== LaneState.DARK;
+  const miniNeedsRestore = Boolean(miniTarget) && !darkStates.mini
+    && miniState !== LaneState.READY
+    && miniState !== LaneState.STARTING
+    && miniState !== LaneState.DARK;
+  const canRestoreSet = Boolean(desiredSetId)
+    && !(largeTarget && darkStates.large)
+    && !(miniTarget && darkStates.mini);
 
-  // Large lane — skip if explicitly DARK
-  if (largeTarget && !darkStates.large) {
-    const laneState = _classifyLane(largeCurrent, largeTarget);
-    if (laneState !== LaneState.READY && laneState !== LaneState.STARTING && laneState !== LaneState.DARK) {
-      actions.push({
-        key: `lane:large:${largeTarget}`,
-        label: `restore large lane ${largeTarget} (state:${laneState})`,
-        pathName: "/api/llm-host/activate",
+  if (canRestoreSet && (largeNeedsRestore || miniNeedsRestore) && swapAllowsAction(currentState, "activate_set")) {
+    return [
+      {
+        key: `set:${desiredSetId}`,
+        label: `activation set ${desiredSetId}`,
+        pathName: "/api/llm-host/activate-set",
         payload: {
-          profile_id: largeTarget,
-          lane_id: "large",
+          set_id: desiredSetId,
           wait: false,
           allow_preempt: true,
         },
-      });
-    }
+      },
+    ];
   }
 
-  // Mini lane — skip if explicitly DARK
-  if (miniTarget && !darkStates.mini) {
-    const laneState = _classifyLane(miniCurrent, miniTarget);
-    if (laneState !== LaneState.READY && laneState !== LaneState.STARTING && laneState !== LaneState.DARK) {
-      actions.push({
-        key: `lane:mini:${miniTarget}`,
-        label: `restore mini lane ${miniTarget} (state:${laneState})`,
-        pathName: "/api/llm-host/activate",
-        payload: {
-          profile_id: miniTarget,
-          lane_id: "mini",
-          wait: false,
-          allow_preempt: true,
-        },
-      });
-    }
+  if (largeNeedsRestore && swapAllowsAction(currentState, "activate")) {
+    actions.push({
+      key: `lane:large:${largeTarget}`,
+      label: `restore large lane ${largeTarget} (state:${largeState})`,
+      pathName: "/api/llm-host/activate",
+      payload: {
+        profile_id: largeTarget,
+        lane_id: "large",
+        wait: false,
+        allow_preempt: true,
+      },
+    });
+  }
+
+  if (miniNeedsRestore && swapAllowsAction(currentState, "activate")) {
+    actions.push({
+      key: `lane:mini:${miniTarget}`,
+      label: `restore mini lane ${miniTarget} (state:${miniState})`,
+      pathName: "/api/llm-host/activate",
+      payload: {
+        profile_id: miniTarget,
+        lane_id: "mini",
+        wait: false,
+        allow_preempt: true,
+      },
+    });
   }
 
   return actions;

@@ -11,24 +11,25 @@
       {
         "set_id": "gamenator_gpt",
         "display_name": "Gamenator GPT",
-        "description": "Run the Gamenator large lane on GPT OSS 120B while keeping the Gemma 31B mini lane available for game review.",
+        "description": "Run the Gamenator large lane on GPT-OSS 120B GGUF while keeping the Gemma 4 26B A4B mini lane available for game review.",
+        "requires_dual_box": false,
         "lane_targets": {
-          "large": "trt_dual_gpt_oss_120b_large",
-          "mini": "gguf_gemma4_31b_mini"
+          "large": "gguf_gptoss120b_large",
+          "mini": "gguf_gemma4_26b_a4b_mini"
         }
       },
       {
         "set_id": "gamenator_qwen",
         "display_name": "Gamenator Qwen",
-        "description": "Run the Gamenator large lane on Qwen3 Next 80B while keeping the Gemma 31B mini lane available for game review.",
+        "description": "Run the Gamenator large lane on Qwen3.6 35B while keeping the Gemma 4 26B A4B mini lane available for game review.",
         "lane_targets": {
-          "large": "gguf_qwen3_next_80b_large",
-          "mini": "gguf_gemma4_31b_mini"
+          "large": "gguf_qwen36_35b_large",
+          "mini": "gguf_gemma4_26b_a4b_mini"
         }
       },
       {
-        "set_id": "inferno",
-        "display_name": "Inferno Solo",
+        "set_id": "gemma431",
+        "display_name": "Gemma 4 31B GGUF Solo",
         "description": "Gemma 4 31B GGUF at full 252K context. Consumes full single-box VRAM; mini lane is dark.",
         "requires_dual_box": false,
         "lane_targets": {
@@ -37,23 +38,23 @@
         }
       },
       {
-        "set_id": "gemma431trt",
-        "display_name": "Gemma 4 31B TRT Solo",
-        "description": "Gemma 4 31B TRT-LLM NVFP4 on large lane only. Faster than GGUF via tensor cores; mini lane dark.",
-        "requires_dual_box": false,
-        "lane_targets": {
-          "large": "trt_single_gemma4_31b_large",
-          "mini": null
-        }
-      },
-      {
         "set_id": "gemma431-gemma431mini",
-        "display_name": "Gemma 4 31B + Gemma 4 31B Reviewer",
-        "description": "GGUF Gemma 4 31B on large (252K ctx) + Gemma 4 31B mini reviewer on :7999.",
+        "display_name": "Gemma 4 31B GGUF + Gemma 4 26B A4B Reviewer",
+        "description": "GGUF Gemma 4 26B A4B on large (252K ctx) + Gemma 4 26B A4B mini reviewer on :7999.",
         "requires_dual_box": false,
         "lane_targets": {
           "large": "gguf_gemma4_31b_large",
-          "mini": "gguf_gemma4_31b_mini"
+          "mini": "gguf_gemma4_26b_a4b_mini"
+        }
+      },
+      {
+        "set_id": "gemma431-qwen36mini",
+        "display_name": "Gemma 4 31B GGUF + Qwen3.6 35B Reviewer",
+        "description": "Gemma 4 31B GGUF on large + Qwen3.6 35B GGUF reviewer on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_gemma4_31b_large",
+          "mini": "gguf_qwen36_35b_mini"
         }
       },
       {
@@ -68,22 +69,22 @@
       },
       {
         "set_id": "qwen80next-gemma431mini",
-        "display_name": "Qwen3 Next 80B + Gemma 4 31B Reviewer",
-        "description": "Qwen3 Next 80B large + Gemma 4 31B GGUF mini reviewer on :7999.",
+        "display_name": "Qwen3 Next 80B + Gemma 4 26B A4B Reviewer",
+        "description": "Qwen3 Next 80B large + Gemma 4 26B A4B GGUF mini reviewer on :7999.",
         "requires_dual_box": false,
         "lane_targets": {
           "large": "gguf_qwen3_next_80b_large",
-          "mini": "gguf_gemma4_31b_mini"
+          "mini": "gguf_gemma4_26b_a4b_mini"
         }
       },
       {
-        "set_id": "qwen80next-qwen30mini",
-        "display_name": "Qwen3 Next 80B + Qwen3 30B Mini",
-        "description": "Qwen3 Next 80B large + Qwen3 30B A3B TRT-LLM mini on :7999.",
+        "set_id": "qwen80next-qwen36mini",
+        "display_name": "Qwen3 Next 80B + Qwen3.6 35B Reviewer",
+        "description": "Qwen3 Next 80B large + Qwen3.6 35B GGUF reviewer on :7999.",
         "requires_dual_box": false,
         "lane_targets": {
           "large": "gguf_qwen3_next_80b_large",
-          "mini": "trt_single_qwen3_30b_a3b_mini"
+          "mini": "gguf_qwen36_35b_mini"
         }
       },
       {
@@ -108,12 +109,22 @@
       },
       {
         "set_id": "qwen80nextcoder-gemma431mini",
-        "display_name": "CoderNext GGUF + Gemma 4 31B Reviewer",
-        "description": "Qwen3 Coder Next large + Gemma 4 31B mini reviewer on :7999.",
+        "display_name": "CoderNext GGUF + Gemma 4 26B A4B Reviewer",
+        "description": "Qwen3 Coder Next large + Gemma 4 26B A4B mini reviewer on :7999.",
         "requires_dual_box": false,
         "lane_targets": {
           "large": "gguf_coder_next_large",
-          "mini": "gguf_gemma4_31b_mini"
+          "mini": "gguf_gemma4_26b_a4b_mini"
+        }
+      },
+      {
+        "set_id": "qwen80nextcoder-qwen36mini",
+        "display_name": "CoderNext GGUF + Qwen3.6 35B Reviewer",
+        "description": "Qwen3 Coder Next large + Qwen3.6 35B GGUF reviewer on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_coder_next_large",
+          "mini": "gguf_qwen36_35b_mini"
         }
       },
       {
@@ -128,22 +139,22 @@
       },
       {
         "set_id": "qwen235-gemma431mini",
-        "display_name": "Qwen3 235B Dual + Gemma 4 31B Reviewer",
-        "description": "Qwen3 235B dual-box large + Gemma 4 31B mini reviewer on :7999.",
+        "display_name": "Qwen3 235B Dual + Gemma 4 26B A4B Reviewer",
+        "description": "Qwen3 235B dual-box large + Gemma 4 26B A4B mini reviewer on :7999.",
         "requires_dual_box": true,
         "lane_targets": {
           "large": "trt_dual_qwen235_large",
-          "mini": "gguf_gemma4_31b_mini"
+          "mini": "gguf_gemma4_26b_a4b_mini"
         }
       },
       {
-        "set_id": "qwen235-qwen32mini",
-        "display_name": "Qwen3 235B Dual + Qwen3 32B Mini",
-        "description": "Qwen3 235B dual-box large + Qwen3 32B NVFP4 TRT mini on :7999.",
+        "set_id": "qwen235-qwen36mini",
+        "display_name": "Qwen3 235B Dual + Qwen3.6 35B Reviewer",
+        "description": "Qwen3 235B dual-box large + Qwen3.6 35B GGUF reviewer on :7999.",
         "requires_dual_box": true,
         "lane_targets": {
           "large": "trt_dual_qwen235_large",
-          "mini": "trt_single_qwen3_32b_mini"
+          "mini": "gguf_qwen36_35b_mini"
         }
       },
       {
@@ -158,21 +169,31 @@
       },
       {
         "set_id": "llama370-gemma431mini",
-        "display_name": "Llama 3.3 70B Dual + Gemma 4 31B Reviewer",
-        "description": "Llama 3.3 70B dual-box large + Gemma 4 31B mini reviewer on :7999.",
+        "display_name": "Llama 3.3 70B Dual + Gemma 4 26B A4B Reviewer",
+        "description": "Llama 3.3 70B dual-box large + Gemma 4 26B A4B mini reviewer on :7999.",
         "requires_dual_box": true,
         "lane_targets": {
           "large": "trt_dual_llama33_70b_large",
-          "mini": "gguf_gemma4_31b_mini"
+          "mini": "gguf_gemma4_26b_a4b_mini"
+        }
+      },
+      {
+        "set_id": "llama370-qwen36mini",
+        "display_name": "Llama 3.3 70B Dual + Qwen3.6 35B Reviewer",
+        "description": "Llama 3.3 70B dual-box large + Qwen3.6 35B GGUF reviewer on :7999.",
+        "requires_dual_box": true,
+        "lane_targets": {
+          "large": "trt_dual_llama33_70b_large",
+          "mini": "gguf_qwen36_35b_mini"
         }
       },
       {
         "set_id": "gptoss120",
-        "display_name": "GPT-OSS 120B Dual Solo",
-        "description": "OpenAI GPT-OSS 120B dual-box TRT-LLM. Both boxes occupied. Mini dark.",
-        "requires_dual_box": true,
+        "display_name": "GPT-OSS 120B Solo",
+        "description": "GPT-OSS 120B GGUF on the large lane. Preferred replacement for the older TRT dual-box lane.",
+        "requires_dual_box": false,
         "lane_targets": {
-          "large": "trt_dual_gpt_oss_120b_large",
+          "large": "gguf_gptoss120b_large",
           "mini": null
         }
       },
@@ -183,6 +204,116 @@
         "requires_dual_box": true,
         "lane_targets": {
           "large": "trt_dual_nemotron120_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "qwen36",
+        "display_name": "Qwen3.6 35B Solo",
+        "description": "Qwen3.6 35B A3B GGUF on the large lane. Single-box bakeoff path.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_qwen36_35b_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "qwen36-gemma431mini",
+        "display_name": "Qwen3.6 35B + Gemma 4 26B A4B Reviewer",
+        "description": "Qwen3.6 35B GGUF on large + Gemma 4 26B A4B GGUF reviewer on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_qwen36_35b_large",
+          "mini": "gguf_gemma4_26b_a4b_mini"
+        }
+      },
+      {
+        "set_id": "qwen36-qwen36mini",
+        "display_name": "Qwen3.6 35B + Qwen3.6 35B Reviewer",
+        "description": "Qwen3.6 35B GGUF on large + Qwen3.6 35B GGUF reviewer on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_qwen36_35b_large",
+          "mini": "gguf_qwen36_35b_mini"
+        }
+      },
+      {
+        "set_id": "gptoss20",
+        "display_name": "GPT-OSS 20B Solo",
+        "description": "GPT-OSS 20B GGUF on the large lane. Fastest single-box OSS bakeoff path.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_gptoss20b_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "gptoss120-gemma431mini",
+        "display_name": "GPT-OSS 120B + Gemma 4 26B A4B Reviewer",
+        "description": "GPT-OSS 120B GGUF on large + Gemma 4 26B A4B GGUF reviewer on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_gptoss120b_large",
+          "mini": "gguf_gemma4_26b_a4b_mini"
+        }
+      },
+      {
+        "set_id": "gptoss120-qwen36mini",
+        "display_name": "GPT-OSS 120B + Qwen3.6 35B Reviewer",
+        "description": "GPT-OSS 120B GGUF on large + Qwen3.6 35B GGUF reviewer on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_gptoss120b_large",
+          "mini": "gguf_qwen36_35b_mini"
+        }
+      },
+      {
+        "set_id": "qwen35-122b",
+        "display_name": "Qwen3.5 122B Solo",
+        "description": "Qwen3.5 122B A10B GGUF on the large lane. Single-box bench path used in bakeoff.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_qwen35_122b_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "qwen35-122b-gemma431mini",
+        "display_name": "Qwen3.5 122B + Gemma 4 26B A4B Reviewer",
+        "description": "Qwen3.5 122B GGUF on large + Gemma 4 26B A4B GGUF reviewer on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_qwen35_122b_large",
+          "mini": "gguf_gemma4_26b_a4b_mini"
+        }
+      },
+      {
+        "set_id": "qwen35-122b-qwen36mini",
+        "display_name": "Qwen3.5 122B + Qwen3.6 35B Reviewer",
+        "description": "Qwen3.5 122B GGUF on large + Qwen3.6 35B GGUF reviewer on :7999.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_qwen35_122b_large",
+          "mini": "gguf_qwen36_35b_mini"
+        }
+      },
+      {
+        "set_id": "minimax-m27",
+        "display_name": "MiniMax M2.7 Solo",
+        "description": "MiniMax M2.7 UD-IQ4_XS GGUF on the large lane. Heavy single-box bench path.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_minimax_m27_large",
+          "mini": null
+        }
+      },
+      {
+        "set_id": "gemma426",
+        "display_name": "Gemma 4 26B A4B Solo",
+        "description": "Gemma 4 26B A4B GGUF on the large lane. Fast single-box Gemma path.",
+        "requires_dual_box": false,
+        "lane_targets": {
+          "large": "gguf_gemma4_26b_a4b_large",
           "mini": null
         }
       }
@@ -233,7 +364,7 @@
   "fleet_profiles": [
     {
       "fleet_id": "mini_qwen30_deepseek32",
-      "display_name": "Mini Fleet: Qwen 30B + DeepSeek 32B",
+      "display_name": "Mini Fleet: Gemma 26 A4B + DeepSeek 32B",
       "mode": "mini_pool",
       "selection_role": "fleet_default",
       "startup_expectation": {
@@ -242,14 +373,14 @@
       },
       "members": [
         {
-          "member_id": "spark_qwen30",
-          "profile_id": "trt_single_qwen3_30b_a3b_mini",
-          "display_name": "Qwen3 30B A3B NVFP4",
-          "model_id": "nvidia/Qwen3-30B-A3B-NVFP4",
-          "runtime_family": "trtllm",
+          "member_id": "spark_gemma426",
+          "profile_id": "gguf_gemma4_26b_a4b_mini",
+          "display_name": "Gemma 4 26B A4B GGUF Mini",
+          "model_id": "google/gemma-4-26B-A4B-it-GGUF",
+          "runtime_family": "llama.cpp",
           "host_id": "spark",
           "port": 7999,
-          "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_trt_single_qwen3_30b_a3b_7999.sh"
+          "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_gemma4_26b_a4b_7999.sh"
         },
         {
           "member_id": "gx10_deepseek32",
@@ -262,7 +393,7 @@
           "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_worker_deepseek_7999.sh"
         }
       ],
-      "notes": "One 32B-class mini per box. Intended for fleet-up mode only."
+      "notes": "Gemma 26 A4B on spark plus DeepSeek 32B on gx10. TRT mini lane retired."
     }
   ],
   "profiles": [
@@ -349,9 +480,9 @@
         "spark": "/mnt/models/nvidia/Gemma-4-31B-IT-NVFP4/files",
         "gx10": ""
       },
-      "selection_role": "cli_candidate",
-      "cli_selectable": true,
-      "notes": "Single-box Gemma 4 31B NVFP4 via TRT-LLM on spark. Faster than GGUF variant; use this as the default Gemma lane."
+      "selection_role": "retired",
+      "cli_selectable": false,
+      "notes": "Retired Gemma 4 31B TRT lane. Kept only as historical metadata; do not publish or select for new runs."
     },
     {
       "profile_id": "gguf_gemma4_31b_large",
@@ -436,9 +567,9 @@
         "spark": "/mnt/models/nvidia/Qwen3-30B-A3B-NVFP4/files",
         "gx10": "/mnt/models/nvidia/Qwen3-30B-A3B-NVFP4/files"
       },
-      "selection_role": "cli_candidate",
-      "cli_selectable": true,
-      "notes": "Mini TRT profile. Normal single-mini target on :7999."
+      "selection_role": "retired",
+      "cli_selectable": false,
+      "notes": "Retired mini TRT lane. Replaced by the current Qwen3.6 large + Gemma 4 26B A4B mini GGUF path."
     },
     {
       "profile_id": "trt_single_qwen3_32b_mini",
@@ -465,9 +596,9 @@
         "spark": "/mnt/models/nvidia/Qwen3-32B-NVFP4/files",
         "gx10": "/mnt/models/nvidia/Qwen3-32B-NVFP4/files"
       },
-      "selection_role": "cli_candidate",
-      "cli_selectable": true,
-      "notes": "Mini TRT profile. Normal single-mini target on :7999."
+      "selection_role": "retired",
+      "cli_selectable": false,
+      "notes": "Retired mini TRT lane. Replaced by the current Qwen3.6 large + Gemma 4 26B A4B mini GGUF path."
     },
     {
       "profile_id": "trt_dual_gpt_oss_120b_large",
@@ -495,9 +626,12 @@
         "spark": "/mnt/models/openai/gpt-oss-120b/files/models--openai--gpt-oss-120b",
         "gx10": "/mnt/models/openai/gpt-oss-120b/files/models--openai--gpt-oss-120b"
       },
-      "selection_role": "cli_dual_candidate",
-      "cli_selectable": true,
-      "notes": "Reserves both boxes and serves through spark:8000."
+      "selection_role": "retired",
+      "cli_selectable": false,
+      "notes": "Retired GPT-OSS 120B TRT lane. Kept only as historical/container metadata; do not publish or select for new runs.",
+      "support_status": "retired",
+      "recommended_action": "retired",
+      "runtime_notes": "Retired from live selection after the GPT-OSS 120B GGUF lane replaced it."
     },
     {
       "profile_id": "trt_dual_nemotron120_large",
@@ -617,6 +751,247 @@
       "selection_role": "alpha_reserved",
       "cli_selectable": false,
       "notes": "Mini lane default. Keep reserved for Alpha unless explicitly overridden later."
+    },
+    {
+      "profile_id": "gguf_qwen36_35b_large",
+      "display_name": "Qwen3.6 35B A3B GGUF",
+      "model_id": "Qwen/Qwen3.6-35B-A3B-UD-Q4_K_M",
+      "runtime_family": "llama.cpp",
+      "size_class": "large",
+      "parameter_count_b": 35,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_qwen36_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 10,
+        "cold_start_s": 45,
+        "ready_timeout_s": 180
+      },
+      "model_paths": {
+        "spark": "/mnt/models/gguf/Qwen3.6-35B-A3B-Q4_K_M/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        "gx10": ""
+      },
+      "selection_role": "cli_candidate",
+      "cli_selectable": true,
+      "notes": "Single-box Qwen3.6 GGUF wired from the bakeoff path. Proven at 128K/262K on spark."
+    },
+    {
+      "profile_id": "gguf_qwen36_35b_mini",
+      "display_name": "Qwen3.6 35B A3B GGUF Mini",
+      "model_id": "Qwen/Qwen3.6-35B-A3B-UD-Q4_K_M",
+      "runtime_family": "llama.cpp",
+      "size_class": "mini",
+      "parameter_count_b": 35,
+      "default_lane": "mini",
+      "allowed_lanes": [
+        "mini"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_qwen36_7999.sh",
+      "startup_expectation": {
+        "warm_switch_s": 10,
+        "cold_start_s": 60,
+        "ready_timeout_s": 240
+      },
+      "model_paths": {
+        "spark": "/mnt/models/gguf/Qwen3.6-35B-A3B-Q4_K_M/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        "gx10": ""
+      },
+      "selection_role": "gamenator_reviewer",
+      "cli_selectable": false,
+      "notes": "Qwen3.6 mini reviewer lane on :7999. Same model family as the large lane, scoped for combo/reviewer experiments."
+    },
+    {
+      "profile_id": "gguf_gptoss20b_large",
+      "display_name": "GPT-OSS 20B GGUF",
+      "model_id": "openai/gpt-oss-20b-gguf",
+      "runtime_family": "llama.cpp",
+      "size_class": "large",
+      "parameter_count_b": 20,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_gptoss20b_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 8,
+        "cold_start_s": 30,
+        "ready_timeout_s": 180
+      },
+      "model_paths": {
+        "spark": "/mnt/models/gguf/gpt-oss-20b-Q4_K_M/gpt-oss-20b-Q4_K_M.gguf",
+        "gx10": ""
+      },
+      "selection_role": "cli_candidate",
+      "cli_selectable": true,
+      "notes": "Fast single-box GPT-OSS GGUF path from the bakeoff. Useful when startup speed matters more than depth."
+    },
+    {
+      "profile_id": "gguf_gptoss120b_large",
+      "display_name": "GPT-OSS 120B GGUF",
+      "model_id": "openai/gpt-oss-120b-gguf",
+      "runtime_family": "llama.cpp",
+      "size_class": "large",
+      "parameter_count_b": 120,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_gptoss120b_gguf_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 15,
+        "cold_start_s": 90,
+        "ready_timeout_s": 240
+      },
+      "model_paths": {
+        "spark": "/mnt/models/gguf/gpt-oss-120b-Q4_K_M/Q4_K_M/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf",
+        "gx10": ""
+      },
+      "selection_role": "cli_candidate",
+      "cli_selectable": true,
+      "notes": "Preferred GPT-OSS runtime from bakeoff. Frees gx10 and outperformed the TRT baseline."
+    },
+    {
+      "profile_id": "gguf_qwen35_122b_large",
+      "display_name": "Qwen3.5 122B GGUF",
+      "model_id": "Qwen/Qwen3.5-122B-A10B-Q4_K_M",
+      "runtime_family": "llama.cpp",
+      "size_class": "large",
+      "parameter_count_b": 122,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_qwen35_122b_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 30,
+        "cold_start_s": 120,
+        "ready_timeout_s": 300
+      },
+      "model_paths": {
+        "spark": "/mnt/models/gguf/Qwen3.5-122B-A10B-Q4_K_M/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf",
+        "gx10": ""
+      },
+      "selection_role": "cli_candidate",
+      "cli_selectable": true,
+      "notes": "Large single-box Qwen3.5 GGUF bench path from bakeoff. Slower but strong answer quality."
+    },
+    {
+      "profile_id": "gguf_minimax_m27_large",
+      "display_name": "MiniMax M2.7 GGUF",
+      "model_id": "MiniMax/MiniMax-M2.7-UD-IQ4_XS",
+      "runtime_family": "llama.cpp",
+      "size_class": "large",
+      "parameter_count_b": 230,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_minimax_m27_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 45,
+        "cold_start_s": 180,
+        "ready_timeout_s": 420
+      },
+      "model_paths": {
+        "spark": "/mnt/models/unsloth/MiniMax-M2.7-GGUF/UD-IQ4_XS/MiniMax-M2.7-UD-IQ4_XS-00001-of-00004.gguf",
+        "gx10": ""
+      },
+      "selection_role": "cli_candidate",
+      "cli_selectable": true,
+      "notes": "Heavy single-box bench path. Keep the context conservative to avoid the earlier DGX wedge."
+    },
+    {
+      "profile_id": "gguf_gemma4_26b_a4b_large",
+      "display_name": "Gemma 4 26B A4B GGUF",
+      "model_id": "google/gemma-4-26B-A4B-it-GGUF",
+      "runtime_family": "llama.cpp",
+      "size_class": "large",
+      "parameter_count_b": 26,
+      "default_lane": "large",
+      "allowed_lanes": [
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_gemma4_26b_a4b_8000.sh",
+      "startup_expectation": {
+        "warm_switch_s": 10,
+        "cold_start_s": 120,
+        "ready_timeout_s": 900
+      },
+      "metadata": {
+        "source": "unsloth",
+        "notes": "Gemma 4 26B A4B solo large-lane path."
+      },
+      "cli_selectable": true,
+      "selection_role": "cli_candidate",
+      "notes": "Gemma 4 26B A4B solo large-lane path.",
+      "model_paths": {
+        "spark": "/mnt/models/unsloth/gemma-4-26B-A4B-it-GGUF/files/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "gx10": ""
+      }
+    },
+    {
+      "profile_id": "gguf_gemma4_26b_a4b_mini",
+      "display_name": "Gemma 4 26B A4B GGUF Mini",
+      "model_id": "google/gemma-4-26B-A4B-it-GGUF",
+      "runtime_family": "llama.cpp",
+      "size_class": "mini",
+      "parameter_count_b": 26,
+      "default_lane": "mini",
+      "allowed_lanes": [
+        "mini",
+        "large"
+      ],
+      "requires_both_boxes": false,
+      "backing_hosts": [
+        "spark"
+      ],
+      "launch_command": "bash /home/admin/apps/LLMCommune/scripts/launch_gemma4_26b_a4b_7999.sh",
+      "startup_expectation": {
+        "warm_switch_s": 10,
+        "cold_start_s": 120,
+        "ready_timeout_s": 900
+      },
+      "metadata": {
+        "source": "unsloth",
+        "notes": "Gemma 4 26B A4B reviewer/sidecar lane on :7999."
+      },
+      "cli_selectable": false,
+      "selection_role": "gamenator_reviewer",
+      "notes": "Current fast mini reviewer lane paired with Qwen3.6 and other large-lane sets on :7999.",
+      "model_paths": {
+        "spark": "/mnt/models/unsloth/gemma-4-26B-A4B-it-GGUF/files/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "gx10": ""
+      }
     }
   ],
   "profile_policy": {
@@ -639,13 +1014,13 @@
       "runtime_notes": "Single-box large reasoning lane."
     },
     "trt_single_gemma4_31b_large": {
-      "support_status": "pending_download",
+      "support_status": "retired",
       "evidence_level": "official_only",
-      "recommended_action": "activate_after_download",
+      "recommended_action": "retired",
       "official_max_context_tokens": 131072,
       "recommended_context_tokens": 32768,
       "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6",
-      "runtime_notes": "Official NVIDIA NVFP4 build. Faster than GGUF on GB10 FP4 tensor cores. Activate once nvidia/Gemma-4-31B-IT-NVFP4 is fully downloaded to /mnt/models/nvidia/Gemma-4-31B-IT-NVFP4/files."
+      "runtime_notes": "Retired from live selection after the Gemma 4 26B A4B cutover."
     },
     "gguf_gemma4_31b_large": {
       "support_status": "proven_local",
@@ -666,31 +1041,31 @@
       "runtime_notes": "Retargets the proven Gemma 4 31B GGUF artifact onto the mini lane at 32K context for reviewer use. Do not assume the 64K mini-lane target until a paired large+mini run proves it."
     },
     "trt_single_qwen3_30b_a3b_mini": {
-      "support_status": "proven_local",
+      "support_status": "retired",
       "evidence_level": "local_and_official",
-      "recommended_action": "keep_active",
+      "recommended_action": "retired",
       "official_max_context_tokens": 131072,
       "recommended_context_tokens": 32768,
       "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6",
-      "runtime_notes": "Mini TRT lane; local logs show TRT adjusting to about 32800 tokens."
+      "runtime_notes": "Retired mini TRT lane after moving the fast path to Gemma 4 26B A4B mini."
     },
     "trt_single_qwen3_32b_mini": {
-      "support_status": "proven_local",
+      "support_status": "retired",
       "evidence_level": "local_and_official",
-      "recommended_action": "keep_active",
+      "recommended_action": "retired",
       "official_max_context_tokens": 131072,
       "recommended_context_tokens": 32768,
       "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6",
-      "runtime_notes": "Mini TRT lane; treat YaRN-scale context as future work until revalidated locally."
+      "runtime_notes": "Retired mini TRT lane after moving the fast path to Gemma 4 26B A4B mini."
     },
     "trt_dual_gpt_oss_120b_large": {
-      "support_status": "proven_local",
+      "support_status": "retired",
       "evidence_level": "local_official_and_community",
-      "recommended_action": "keep_active",
+      "recommended_action": "retired",
       "official_max_context_tokens": 131072,
-      "recommended_context_tokens": 131072,
+      "recommended_context_tokens": 32768,
       "recommended_container": "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6",
-      "runtime_notes": "Dual-box TRT lane. Use socket mode on the CX7 link."
+      "runtime_notes": "Retired from live selection after the GPT-OSS 120B GGUF lane replaced it."
     },
     "trt_dual_nemotron120_large": {
       "support_status": "pending_download",
@@ -727,6 +1102,77 @@
       "recommended_context_tokens": 16384,
       "recommended_container": "llama.cpp on host",
       "runtime_notes": "Reasoning-heavy mini lane kept reserved for Alpha for now."
+    },
+    "gguf_qwen36_35b_large": {
+      "support_status": "proven_local",
+      "evidence_level": "local_and_community",
+      "recommended_action": "keep_active",
+      "official_max_context_tokens": 262144,
+      "recommended_context_tokens": 131072,
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Bakeoff-proven Qwen3.6 GGUF path on spark. 128K and 262K were both exercised locally."
+    },
+    "gguf_gptoss20b_large": {
+      "support_status": "proven_local",
+      "evidence_level": "local_and_community",
+      "recommended_action": "keep_active",
+      "official_max_context_tokens": 131072,
+      "recommended_context_tokens": 32768,
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Fastest GPT-OSS single-box GGUF lane from bakeoff."
+    },
+    "gguf_gptoss120b_large": {
+      "support_status": "proven_local",
+      "evidence_level": "local_and_community",
+      "recommended_action": "keep_active",
+      "official_max_context_tokens": 131072,
+      "recommended_context_tokens": 32768,
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Preferred GPT-OSS lane from bakeoff. Faster startup and simpler ops than dual-box TRT."
+    },
+    "gguf_qwen35_122b_large": {
+      "support_status": "bench_candidate",
+      "evidence_level": "local_and_community",
+      "recommended_action": "available_bench",
+      "official_max_context_tokens": 131072,
+      "recommended_context_tokens": 32768,
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Single-box Qwen3.5 122B GGUF bench path. Strong answers, slower startup and throughput."
+    },
+    "gguf_minimax_m27_large": {
+      "support_status": "bench_candidate",
+      "evidence_level": "local_and_community",
+      "recommended_action": "available_bench",
+      "official_max_context_tokens": 196608,
+      "recommended_context_tokens": 16384,
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Heavy MiniMax single-box bench path. Keep 16K as the conservative default after the earlier full-context wedge."
+    },
+    "gguf_gemma4_26b_a4b_large": {
+      "publication_state": "published",
+      "recommended_action": "current",
+      "support_status": "proven_local",
+      "evidence_level": "local_and_community",
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Standalone bakeoff-proven Gemma 4 26B A4B solo path on spark."
+    },
+    "gguf_gemma4_26b_a4b_mini": {
+      "publication_state": "published",
+      "recommended_action": "current",
+      "support_status": "proven_local",
+      "evidence_level": "local_and_community",
+      "recommended_container": "llama.cpp on host",
+      "runtime_notes": "Current fast mini reviewer lane paired with Qwen3.6 and other large-lane sets."
+    },
+    "gguf_qwen36_35b_mini": {
+      "support_status": "experimental_local",
+      "evidence_level": "local_and_community",
+      "recommended_action": "available_bench",
+      "recommended_context_tokens": 32768,
+      "recommended_container": "llama.cpp on host",
+      "official_max_context_tokens": 262144,
+      "runtime_notes": "Qwen3.6 mini reviewer lane. Added for dual-role combo coverage; keep context conservative until dedicated mini validation is complete.",
+      "publication_state": "published"
     }
   },
   "inventory_models": [
@@ -989,6 +1435,76 @@
         "spark": "/mnt/models/qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M/files/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf",
         "gx10": "/mnt/models/qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M/files/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf"
       }
+    },
+    {
+      "model_id": "nvidia/Gemma-4-31B-IT-NVFP4",
+      "display_name": "Gemma 4 31B NVFP4",
+      "size_class": "large",
+      "parameter_count_b": 31,
+      "model_paths": {
+        "spark": "/mnt/models/nvidia/Gemma-4-31B-IT-NVFP4/files",
+        "gx10": ""
+      }
+    },
+    {
+      "model_id": "Qwen/Qwen3.6-35B-A3B-UD-Q4_K_M",
+      "display_name": "Qwen3.6 35B A3B GGUF",
+      "size_class": "large",
+      "parameter_count_b": 35,
+      "model_paths": {
+        "spark": "/mnt/models/gguf/Qwen3.6-35B-A3B-Q4_K_M/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        "gx10": ""
+      }
+    },
+    {
+      "model_id": "openai/gpt-oss-20b-gguf",
+      "display_name": "GPT-OSS 20B GGUF",
+      "size_class": "large",
+      "parameter_count_b": 20,
+      "model_paths": {
+        "spark": "/mnt/models/gguf/gpt-oss-20b-Q4_K_M/gpt-oss-20b-Q4_K_M.gguf",
+        "gx10": ""
+      }
+    },
+    {
+      "model_id": "openai/gpt-oss-120b-gguf",
+      "display_name": "GPT-OSS 120B GGUF",
+      "size_class": "large",
+      "parameter_count_b": 120,
+      "model_paths": {
+        "spark": "/mnt/models/gguf/gpt-oss-120b-Q4_K_M/Q4_K_M/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf",
+        "gx10": ""
+      }
+    },
+    {
+      "model_id": "Qwen/Qwen3.5-122B-A10B-Q4_K_M",
+      "display_name": "Qwen3.5 122B GGUF",
+      "size_class": "large",
+      "parameter_count_b": 122,
+      "model_paths": {
+        "spark": "/mnt/models/gguf/Qwen3.5-122B-A10B-Q4_K_M/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf",
+        "gx10": ""
+      }
+    },
+    {
+      "model_id": "MiniMax/MiniMax-M2.7-UD-IQ4_XS",
+      "display_name": "MiniMax M2.7 GGUF",
+      "size_class": "large",
+      "parameter_count_b": 230,
+      "model_paths": {
+        "spark": "/mnt/models/unsloth/MiniMax-M2.7-GGUF/UD-IQ4_XS/MiniMax-M2.7-UD-IQ4_XS-00001-of-00004.gguf",
+        "gx10": ""
+      }
+    },
+    {
+      "model_id": "google/gemma-4-26B-A4B-it-GGUF",
+      "display_name": "Gemma 4 26B A4B GGUF",
+      "size_class": "large",
+      "parameter_count_b": 26,
+      "model_paths": {
+        "spark": "/mnt/models/unsloth/gemma-4-26B-A4B-it-GGUF/files/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "gx10": ""
+      }
     }
   ],
   "inventory_policy": {
@@ -1199,6 +1715,57 @@
       "recommended_action": "keep_active",
       "recommended_context_tokens": 65536,
       "notes": "Curated single-box large reasoning lane."
+    },
+    "Qwen/Qwen3.6-35B-A3B-UD-Q4_K_M": {
+      "preferred_runtime": "llama.cpp",
+      "support_status": "proven_local",
+      "recommended_action": "keep_active",
+      "recommended_context_tokens": 131072,
+      "topology_hint": "single_box",
+      "notes": "Bakeoff-proven Qwen3.6 GGUF path on spark. Shared inventory for large and mini reviewer roles."
+    },
+    "google/gemma-4-26B-A4B-it-GGUF": {
+      "preferred_runtime": "llama.cpp",
+      "support_status": "proven_local",
+      "recommended_action": "current",
+      "recommended_context_tokens": 32768,
+      "topology_hint": "single_box",
+      "notes": "Gemma 4 26B A4B GGUF inventory backing both solo and reviewer lanes."
+    },
+    "openai/gpt-oss-20b-gguf": {
+      "preferred_runtime": "llama.cpp",
+      "support_status": "proven_local",
+      "recommended_action": "available_bench",
+      "recommended_context_tokens": 32768,
+      "topology_hint": "single_box"
+    },
+    "openai/gpt-oss-120b-gguf": {
+      "preferred_runtime": "llama.cpp",
+      "support_status": "proven_local",
+      "recommended_action": "promote_next",
+      "recommended_context_tokens": 32768,
+      "topology_hint": "single_box"
+    },
+    "Qwen/Qwen3.5-122B-A10B-Q4_K_M": {
+      "preferred_runtime": "llama.cpp",
+      "support_status": "bench_candidate",
+      "recommended_action": "available_bench",
+      "recommended_context_tokens": 32768,
+      "topology_hint": "single_box"
+    },
+    "MiniMax/MiniMax-M2.7-UD-IQ4_XS": {
+      "preferred_runtime": "llama.cpp",
+      "support_status": "bench_candidate",
+      "recommended_action": "available_bench",
+      "recommended_context_tokens": 16384,
+      "topology_hint": "single_box"
+    },
+    "nvidia/Gemma-4-31B-IT-NVFP4": {
+      "preferred_runtime": "trtllm",
+      "support_status": "retired",
+      "recommended_action": "retired",
+      "recommended_context_tokens": 32768,
+      "topology_hint": "single_box"
     }
   },
   "candidate_models": [
@@ -1207,48 +1774,48 @@
       "display_name": "Qwen3.6 35B A3B GGUF",
       "preferred_runtime": "llama.cpp",
       "topology_hint": "single_box",
-      "support_status": "bakeoff_proven_not_wired",
+      "support_status": "proven_local",
       "recommended_action": "promote_next",
       "recommended_context_tokens": 32768,
       "scoreboard_file": "qwen36_35b_gguf.json",
       "catalog_family_id": "qwen36",
-      "notes": "Strong single-box bakeoff performer. Promote into the catalog once wired into the controller."
+      "notes": "Strong single-box bakeoff performer. Wired into the controller as set qwen36."
     },
     {
       "model_id": "openai/gpt-oss-120b-gguf",
       "display_name": "GPT-OSS 120B GGUF",
       "preferred_runtime": "llama.cpp",
-      "topology_hint": "dual_box",
-      "support_status": "bakeoff_proven_not_wired",
+      "topology_hint": "single_box",
+      "support_status": "proven_local",
       "recommended_action": "promote_next",
       "recommended_context_tokens": 32768,
       "scoreboard_file": "gptoss120b_gguf.json",
       "catalog_family_id": "gptoss120",
-      "notes": "Bakeoff winner over the TRT path. Promote as the preferred GPT-OSS runtime when wiring lands."
+      "notes": "Bakeoff winner over the TRT path. Wired into the controller as set gptoss120; TRT remains fallback."
     },
     {
       "model_id": "openai/gpt-oss-20b-gguf",
       "display_name": "GPT-OSS 20B GGUF",
       "preferred_runtime": "llama.cpp",
       "topology_hint": "single_box",
-      "support_status": "bakeoff_proven_not_wired",
+      "support_status": "proven_local",
       "recommended_action": "promote_next",
       "recommended_context_tokens": 32768,
       "scoreboard_file": "gptoss20b_gguf.json",
       "catalog_family_id": "gptoss20",
-      "notes": "Fastest bakeoff path in the OSS family. Keep visible as a candidate even before controller wiring."
+      "notes": "Fast single-box GPT-OSS candidate now wired into the controller as set gptoss20."
     },
     {
       "model_id": "Qwen/Qwen3.5-122B-A10B-Q4_K_M",
       "display_name": "Qwen3.5 122B GGUF",
       "preferred_runtime": "llama.cpp",
-      "topology_hint": "dual_box",
+      "topology_hint": "single_box",
       "support_status": "bench_candidate",
       "recommended_action": "available_bench",
       "recommended_context_tokens": 32768,
       "scoreboard_file": "qwen35_122b_gguf.json",
       "catalog_family_id": "qwen35-122b",
-      "notes": "Strong but slower than the top promote-next models. Keep on the visible bench."
+      "notes": "Strong but slower than the top promote-next models. Wired into the controller as set qwen35-122b."
     },
     {
       "model_id": "Qwen/Qwen3.5-122B-A10B-NVFP4",
@@ -1269,10 +1836,10 @@
       "topology_hint": "single_box",
       "support_status": "bench_candidate",
       "recommended_action": "available_bench",
-      "recommended_context_tokens": 32768,
+      "recommended_context_tokens": 16384,
       "scoreboard_file": "minimax_m27_gguf.json",
       "catalog_family_id": "minimax-m27",
-      "notes": "Interesting bench candidate with acceptable quality but weaker overall promotion signal."
+      "notes": "Interesting bench candidate with acceptable quality but weaker overall promotion signal. Wired into the controller as set minimax-m27 with a conservative 16K default."
     },
     {
       "model_id": "QuantTrio/Qwen3-VL-235B-A22B-Instruct-AWQ",
@@ -1339,6 +1906,14 @@
       "recommended_context_tokens": null,
       "recommended_container": "future validated TensorRT-LLM release",
       "notes": "Do not promote into the active controller. Published size is too large for a normal two-GX10 fit."
+    },
+    {
+      "model_id": "google/gemma-4-26B-A4B-it-GGUF",
+      "display_name": "Gemma 4 26B A4B GGUF",
+      "preferred_runtime": "llama.cpp",
+      "recommended_action": "current",
+      "scoreboard_file": "gemma4_26b_a4b_gguf_standalone.json",
+      "catalog_family_id": "gemma426"
     }
   ]
 }

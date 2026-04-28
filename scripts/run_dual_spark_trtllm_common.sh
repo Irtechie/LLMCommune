@@ -423,7 +423,7 @@ start_container_here() {
     -v "$HOST_RUNTIME_ROOT:$CONTAINER_RUNTIME_ROOT" \
     -v /mnt/models:/mnt/models \
     "$DOCKER_IMAGE" \
-    sh -c "curl -fsSL https://raw.githubusercontent.com/NVIDIA/dgx-spark-playbooks/refs/heads/main/nvidia/trt-llm/assets/trtllm-mn-entrypoint.sh | sh"
+    bash -lc "curl -fsSL https://raw.githubusercontent.com/NVIDIA/dgx-spark-playbooks/refs/heads/main/nvidia/trt-llm/assets/trtllm-mn-entrypoint.sh | bash"
 }
 
 start_container_remote() {
@@ -457,7 +457,7 @@ start_container_remote() {
     -v '$HOST_RUNTIME_ROOT:$CONTAINER_RUNTIME_ROOT' \
     -v /mnt/models:/mnt/models \
     '$DOCKER_IMAGE' \
-    sh -c 'curl -fsSL https://raw.githubusercontent.com/NVIDIA/dgx-spark-playbooks/refs/heads/main/nvidia/trt-llm/assets/trtllm-mn-entrypoint.sh | sh'"
+    bash -lc 'curl -fsSL https://raw.githubusercontent.com/NVIDIA/dgx-spark-playbooks/refs/heads/main/nvidia/trt-llm/assets/trtllm-mn-entrypoint.sh | bash'"
 }
 
 stop_container_here() {
@@ -466,6 +466,22 @@ stop_container_here() {
 
 stop_container_remote() {
   remote "docker rm -f '$CONTAINER_NAME' >/dev/null 2>&1 || true" || true
+}
+
+host_port_listener_summary() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -Hlnpt "sport = :$PORT" 2>/dev/null || true
+    return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true
+    return 0
+  fi
+  return 0
+}
+
+host_port_busy() {
+  host_port_listener_summary | grep -q .
 }
 
 prepare_container() {
@@ -497,6 +513,12 @@ wait_for_worker_ssh() {
 }
 
 launch_server() {
+  if host_port_busy; then
+    local listeners
+    listeners="$(host_port_listener_summary | tr '\n' '; ' | sed 's/[[:space:]]\+/ /g')"
+    record_status "launch_blocked_port_in_use port=$PORT slot=$SLOT_LABEL listeners=${listeners:-unknown}"
+    return 1
+  fi
   docker exec "$CONTAINER_NAME" bash -lc "cat >/tmp/start-trtllm-$PORT.sh <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -629,6 +651,10 @@ wait_for_api() {
       API_READY_AT="$(date -Is)"
       return 0
     fi
+    if ! assert_server_process_alive; then
+      record_status "api_wait_process_missing port=$PORT slot=$SLOT_LABEL probe=$attempt/$max_attempts"
+      return 2
+    fi
     sleep 5
   done
   record_status "api_ready_timeout port=$PORT slot=$SLOT_LABEL"
@@ -637,6 +663,7 @@ wait_for_api() {
 
 complete_startup_after_launch() {
   local startup_attempt="${1:-}"
+  local wait_rc=0
   LAST_PHASE="api_wait"
   if wait_for_api "$startup_attempt"; then
     sleep 5
@@ -677,6 +704,16 @@ PY
     mark_slot_active
     curl -fsS "http://127.0.0.1:$PORT/v1/models" || true
     return 0
+  fi
+  wait_rc=$?
+
+  if [[ "$wait_rc" -eq 2 ]]; then
+    log "serve process exited before API became ready on :$PORT"
+    write_startup_state "server_launch_failed" "serve process exited before API became ready" "$startup_attempt" "server_process_missing"
+    write_slot_metadata "server_launch_failed" false "serve process exited before API became ready" "$startup_attempt" "server_process_missing"
+    write_active_slot_metadata "server_launch_failed" "$SLOT_LABEL" "serve process exited before API became ready" "$startup_attempt" "server_process_missing"
+    show_status
+    return 1
   fi
 
   log "API did not become ready on attempt $startup_attempt"

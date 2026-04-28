@@ -1,6 +1,6 @@
 // @ts-check
 import { exec as execCallback, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile, mkdir, open, rename, rm as rmFile, copyFile, appendFile, stat } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
@@ -78,6 +78,7 @@ async function withDesiredStateLock(lockPath, fn) {
   const MAX_RETRIES = 20;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
+      await mkdir(path.dirname(lockPath), { recursive: true });
       const fh = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY);
       await fh.writeFile(String(process.pid));
       await fh.close();
@@ -198,6 +199,7 @@ export function createRuntime({
   repoRoot,
   workerSsh = "admin@192.168.1.204",
   workerSshOptions = "-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -i /home/admin/.ssh/trtllm_ed25519",
+  bootSetId = process.env.LLMCOMMUNE_BOOT_SET_ID || "",
   dependencies = {},
   paths = {},
 } = {}) {
@@ -216,6 +218,8 @@ export function createRuntime({
   const localLargeSlotPath = paths.localLargeSlotPath || path.join(stateRoot, "large_slot.json");
   const localMiniSlotPath = paths.localMiniSlotPath || path.join(stateRoot, "mini_slot.json");
   const desiredStatePath = paths.desiredStatePath || path.join(stateRoot, "desired_state.json");
+  const swapManifestPath = paths.swapManifestPath || path.join(stateRoot, "swap_manifest.json");
+  const swapJournalPath = paths.swapJournalPath || path.join(stateRoot, "swap_journal.jsonl");
   const activeManagedSlotPath = paths.activeManagedSlotPath || path.join(jobsStateRoot, "active_slot.json");
   const jobHistoryPath = paths.jobHistoryPath || path.join(stateRoot, "job_history.jsonl");
   const auditLogPath = paths.auditLogPath || path.join(stateRoot, "activation_audit.jsonl");
@@ -230,6 +234,9 @@ export function createRuntime({
   const jobs = new Map();
   let cache = { ts: 0, value: null };
   const currentIso = () => new Date(nowMs()).toISOString();
+  const requestedBootSetId = String(bootSetId || "").trim();
+  const controllerEpoch = `swap-epoch-${uuid()}`;
+  let swapEventSeq = 0;
 
   // Per-lane activation mutex — prevents two concurrent activations on the same lane.
   const laneLocks = new Map();
@@ -238,6 +245,9 @@ export function createRuntime({
   let _activating = false;
   let _activatingSetId = "";
   let _activatingStartMs = 0;
+  let _activatingJobId = "";
+  let _activatingPromise = null;
+  let _activationGeneration = 0;
   const ACTIVATION_COOLDOWN_MS = 30000; // 30s minimum between completed activations
   let _lastActivationCompletedMs = 0;
 
@@ -337,14 +347,75 @@ export function createRuntime({
         }
       }
     }
-    // Startup reconciliation: if desired_state names an unknown active_set_id, null it out.
+    // Startup reconciliation: derive persisted activation-set identity from lane targets.
     const desiredState = await loadDesiredState();
-    const knownSetIds = new Set((config.controller?.activation_sets || []).map((s) => String(s.set_id || "")));
-    const storedSetId = String(desiredState.active_set_id || "").trim();
-    if (storedSetId && !knownSetIds.has(storedSetId)) {
-      logger.warn("startup: desired_state.active_set_id not in catalog — clearing", { active_set_id: storedSetId });
-      await saveDesiredState({ ...desiredState, active_set_id: null });
+    const reconciledDesiredState = withResolvedActivationSetId(config, desiredState);
+    const rawStoredSetId = String(desiredState.active_set_id || "").trim();
+    const reconciledSetId = String(reconciledDesiredState.active_set_id || "").trim();
+    if (rawStoredSetId !== reconciledSetId) {
+      const loggerMethod = rawStoredSetId ? "warn" : "info";
+      logger[loggerMethod]("startup: reconciling desired_state.active_set_id", {
+        from: rawStoredSetId || null,
+        to: reconciledSetId || null,
+      });
+      await saveDesiredState(reconciledDesiredState);
     }
+    const normalizedBootSetId = canonicalActivationSetId(requestedBootSetId);
+    if (!normalizedBootSetId) {
+      return;
+    }
+    if (!activationSetById(config, normalizedBootSetId)) {
+      logger.warn("startup: boot activation set missing", { set_id: normalizedBootSetId });
+      return;
+    }
+
+    const current = await currentState();
+    const currentDesiredState = withResolvedActivationSetId(config, current?.desired_state || reconciledDesiredState);
+    const desiredLaneTargets = currentDesiredState?.lane_targets || {};
+    const hasDesiredTargets = Boolean(
+      String(currentDesiredState?.active_set_id || "").trim()
+      || String(currentDesiredState?.fleet_id || "").trim()
+      || Object.values(desiredLaneTargets).some((value) => String(value || "").trim())
+    );
+    const desiredStateStatus = String(currentDesiredState?.state || "").trim().toLowerCase();
+    const controllerBusy = Boolean(
+      current?.activating_job_id
+      || current?.lanes?.large?.up
+      || current?.lanes?.mini?.up
+      || current?.mini_fleet?.up
+    );
+    const desiredBootBlocked = hasDesiredTargets && !["", "idle", "failed"].includes(desiredStateStatus);
+    if (controllerBusy || desiredBootBlocked) {
+      logger.info("startup: skipping boot activation", {
+        set_id: normalizedBootSetId,
+        busy: controllerBusy,
+        desired_state: desiredStateStatus || null,
+        active_set_id: String(currentDesiredState?.active_set_id || "").trim() || null,
+        lane_targets: desiredLaneTargets,
+      });
+      return;
+    }
+
+    const bootResult = await activateSet({
+      setId: normalizedBootSetId,
+      wait: false,
+      allowPreempt: true,
+      force: true,
+    });
+    if (!bootResult?.ok) {
+      logger.warn("startup: boot activation failed", {
+        set_id: normalizedBootSetId,
+        code: bootResult?.code || null,
+        detail: bootResult?.detail || bootResult?.status_detail || null,
+      });
+      return;
+    }
+    logger.info("startup: boot activation queued", {
+      set_id: normalizedBootSetId,
+      job_id: bootResult?.job_id || null,
+      status: bootResult?.status || null,
+      attached: Boolean(bootResult?.attached),
+    });
   }
 
   async function loadDesiredState() {
@@ -360,6 +431,432 @@ export function createRuntime({
   }
 
   const desiredStateLockPath = desiredStatePath + ".lock";
+  const swapManifestLockPath = swapManifestPath + ".lock";
+
+  function defaultSwapManifest() {
+    return {
+      schema_version: 1,
+      summary_version: 1,
+      controller_epoch: controllerEpoch,
+      controller_revision: 0,
+      last_committed_event_seq: 0,
+      runtime_incarnation_id: String(process.pid),
+      swap_id: "",
+      current_job_id: "",
+      requested_set_id: "",
+      canonical_set_id: "",
+      requested_generation: 0,
+      observed_generation: 0,
+      state: "idle",
+      terminal_state: "idle",
+      started_at: "",
+      updated_at: "",
+      phase_started_at: "",
+      desired_lane_targets: {
+        large: "",
+        mini: "",
+      },
+      observed_lane_targets: {
+        large: "",
+        mini: "",
+      },
+      parity_status: "unknown",
+      drain_status: "unknown",
+      readiness_status: "unknown",
+      known_idle: true,
+      reconcile_needed: false,
+      evidence_status: "none",
+      evidence_refs: [],
+      failure_code: "",
+      failure_detail: "",
+    };
+  }
+
+  function normalizeSwapManifest(nextState) {
+    const base = defaultSwapManifest();
+    return {
+      ...base,
+      ...(nextState || {}),
+      controller_epoch: controllerEpoch,
+      desired_lane_targets: {
+        ...base.desired_lane_targets,
+        ...(nextState?.desired_lane_targets || {}),
+      },
+      observed_lane_targets: {
+        ...base.observed_lane_targets,
+        ...(nextState?.observed_lane_targets || {}),
+      },
+      evidence_refs: Array.isArray(nextState?.evidence_refs) ? nextState.evidence_refs : base.evidence_refs,
+    };
+  }
+
+  async function loadSwapManifest() {
+    const loaded = await readJsonImpl(swapManifestPath, defaultSwapManifest());
+    const normalized = normalizeSwapManifest(loaded);
+    swapEventSeq = Math.max(swapEventSeq, Number(normalized.last_committed_event_seq || 0));
+    return normalized;
+  }
+
+  async function saveSwapManifest(nextState, expectations = {}) {
+    return withDesiredStateLock(swapManifestLockPath, async () => {
+      const current = await loadSwapManifest();
+      const expectedControllerRevision = expectations?.expectedControllerRevision;
+      const expectedSwapId = String(expectations?.expectedSwapId || "").trim();
+      const expectedCurrentJobId = String(expectations?.expectedCurrentJobId || "").trim();
+      if (
+        expectedControllerRevision !== undefined
+        && Number(current.controller_revision || 0) !== Number(expectedControllerRevision)
+      ) {
+        return {
+          persisted: false,
+          manifest: current,
+          rejection_reason: "controller_revision_mismatch",
+          expected_controller_revision: Number(expectedControllerRevision),
+        };
+      }
+      if (expectedSwapId && String(current.swap_id || "").trim() !== expectedSwapId) {
+        return {
+          persisted: false,
+          manifest: current,
+          rejection_reason: "swap_id_mismatch",
+          expected_swap_id: expectedSwapId,
+        };
+      }
+      if (expectedCurrentJobId && String(current.current_job_id || "").trim() !== expectedCurrentJobId) {
+        return {
+          persisted: false,
+          manifest: current,
+          rejection_reason: "current_job_id_mismatch",
+          expected_current_job_id: expectedCurrentJobId,
+        };
+      }
+      const payload = normalizeSwapManifest({
+        ...current,
+        ...(nextState || {}),
+        controller_revision: Math.max(
+          Number(current.controller_revision || 0) + 1,
+          Number(nextState?.controller_revision || 0) || 0,
+        ),
+        updated_at: currentIso(),
+      });
+      await writeJsonImpl(swapManifestPath, payload);
+      return {
+        persisted: true,
+        manifest: payload,
+      };
+    });
+  }
+
+  async function appendSwapJournal(eventType, payload = {}) {
+    await mkdir(path.dirname(swapJournalPath), { recursive: true });
+    const baseRecord = {
+      schema_version: 1,
+      event_seq: swapEventSeq + 1,
+      event_type: String(eventType || "").trim(),
+      controller_epoch: controllerEpoch,
+      generated_at: currentIso(),
+      ...(payload || {}),
+    };
+    const record = {
+      ...baseRecord,
+      record_checksum: createHash("sha256").update(JSON.stringify(baseRecord)).digest("hex"),
+    };
+    await appendFile(swapJournalPath, `${JSON.stringify(record)}\n`, "utf-8");
+    swapEventSeq = record.event_seq;
+    return record;
+  }
+
+  async function recordSwapTransition(jobId, eventType, nextState, eventPayload = {}, expectations = {}) {
+    const saveResult = await saveSwapManifest({
+      ...(nextState || {}),
+      last_committed_event_seq: swapEventSeq + 1,
+    }, expectations);
+    const manifest = saveResult?.manifest || normalizeSwapManifest(nextState);
+    if (!saveResult?.persisted) {
+      return {
+        ...manifest,
+        transition_rejected: true,
+        rejection_reason: saveResult?.rejection_reason || "swap_transition_rejected",
+        expected_controller_revision: saveResult?.expected_controller_revision ?? null,
+        expected_swap_id: saveResult?.expected_swap_id || "",
+        expected_current_job_id: saveResult?.expected_current_job_id || "",
+      };
+    }
+    await appendSwapJournal(eventType, {
+      swap_id: manifest.swap_id || "",
+      current_job_id: manifest.current_job_id || jobId || "",
+      controller_revision: manifest.controller_revision,
+      requested_set_id: manifest.requested_set_id || "",
+      canonical_set_id: manifest.canonical_set_id || "",
+      state: manifest.state,
+      terminal_state: manifest.terminal_state,
+      known_idle: Boolean(manifest.known_idle),
+      reconcile_needed: Boolean(manifest.reconcile_needed),
+      failure_code: manifest.failure_code || "",
+      failure_detail: manifest.failure_detail || "",
+      ...(eventPayload || {}),
+    });
+    if (jobId) {
+      setJob(jobId, {
+        swap_id: manifest.swap_id,
+        controller_epoch: manifest.controller_epoch,
+        controller_revision: manifest.controller_revision,
+        swap_state: manifest.state,
+        swap_terminal_state: manifest.terminal_state,
+      });
+    }
+    return manifest;
+  }
+
+  function swapTransitionRejected(transition) {
+    return Boolean(transition?.transition_rejected);
+  }
+
+  function swapTransitionConflictDetail(transition, fallback = "swap transition rejected after controller ownership changed") {
+    const expectedRevision = transition?.expected_controller_revision;
+    const currentRevision = transition?.controller_revision;
+    const reason = String(transition?.rejection_reason || "").trim();
+    if (reason === "controller_revision_mismatch" && expectedRevision !== null && expectedRevision !== undefined) {
+      return `${fallback}; expected controller revision ${expectedRevision} but current revision is ${currentRevision}`;
+    }
+    if (reason === "swap_id_mismatch" && transition?.expected_swap_id) {
+      return `${fallback}; expected swap ${transition.expected_swap_id} but current swap is ${transition.swap_id || "<none>"}`;
+    }
+    if (reason === "current_job_id_mismatch" && transition?.expected_current_job_id) {
+      return `${fallback}; expected job ${transition.expected_current_job_id} but current job is ${transition.current_job_id || "<none>"}`;
+    }
+    return fallback;
+  }
+
+  function classifySwapFailureState({ current, failureCode = "", failureDetail = "" } = {}) {
+    const largeUp = Boolean(current?.lanes?.large?.up);
+    const miniUp = Boolean(current?.lanes?.mini?.up);
+    const fleetUp = Boolean(current?.mini_fleet?.up);
+    const knownIdle = !largeUp && !miniUp && !fleetUp;
+    return {
+      eventType: knownIdle ? "swap_failed_known_idle" : "swap_reconcile_needed",
+      state: knownIdle ? "failed_known_idle" : "reconcile_needed",
+      terminal_state: knownIdle ? "failed_known_idle" : "reconcile_needed",
+      readiness_status: "failed",
+      known_idle: knownIdle,
+      reconcile_needed: !knownIdle,
+      evidence_status: "minimal",
+      observed_lane_targets: observedLaneTargetsFromPayloads(current?.lanes?.large, current?.lanes?.mini),
+      failure_code: failureCode || ErrorCode.INTERNAL_ERROR,
+      failure_detail: failureDetail || "activation failed",
+    };
+  }
+
+  function observedLaneTargetsFromPayloads(largePayload, miniPayload) {
+    return {
+      large: largePayload?.up ? String(largePayload?.profile_id || "") : "",
+      mini: miniPayload?.up ? String(miniPayload?.profile_id || "") : "",
+    };
+  }
+
+  function buildSwapActionContract(manifest) {
+    const normalized = normalizeSwapManifest(manifest);
+    const reconcileNeeded = Boolean(
+      normalized.reconcile_needed || String(normalized.terminal_state || "").trim().toLowerCase() === "reconcile_needed",
+    );
+    if (!reconcileNeeded) {
+      return {
+        action_policy_state: "normal",
+        allowed_actions: [
+          "activate",
+          "activate_set",
+          "restart",
+          "stop",
+          "bonzai",
+          "fleet_up",
+          "fleet_down",
+        ],
+        blocked_actions: [],
+        operator_action_required: "",
+        exit_requirements: [],
+      };
+    }
+    return {
+      action_policy_state: "reconcile_needed",
+      allowed_actions: [
+        "stop",
+        "fleet_down",
+      ],
+      blocked_actions: [
+        {
+          action: "activate",
+          reason: "swap_reconcile_needed",
+          detail: "Generic activation stays blocked until the active swap is reconciled.",
+        },
+        {
+          action: "activate_set",
+          reason: "swap_reconcile_needed",
+          detail: "New activation sets stay blocked until the active swap is reconciled.",
+          override_hint: "force=true after operator review",
+        },
+        {
+          action: "restart",
+          reason: "swap_reconcile_needed",
+          detail: "Restart routes through activation and stays blocked until the active swap is reconciled.",
+        },
+        {
+          action: "bonzai",
+          reason: "swap_reconcile_needed",
+          detail: "Bonzai routes through activate-set and stays blocked until the active swap is reconciled.",
+        },
+        {
+          action: "fleet_up",
+          reason: "swap_reconcile_needed",
+          detail: "Fleet-up is blocked until the controller has reconciled the active swap.",
+        },
+      ],
+      operator_action_required: "collect_fresh_evidence",
+      exit_requirements: [
+        "Collect fresh Spark and GX10 runtime evidence for the active swap before clearing reconcile_needed.",
+        "Confirm whether the current runtime is still serving or known idle before forcing a replacement.",
+        "Record cleanup or compensation outcome before admitting a fresh activation.",
+      ],
+    };
+  }
+
+  function buildSwapSummary(manifest, { largePayload, miniPayload, fleet } = {}) {
+    const normalized = normalizeSwapManifest(manifest);
+    const observed = largePayload || miniPayload
+      ? observedLaneTargetsFromPayloads(largePayload, miniPayload)
+      : normalized.observed_lane_targets;
+    const activeTransitionStates = new Set(["preflight", "stopping", "drained", "starting"]);
+    const inferredKnownIdle = !activeTransitionStates.has(String(normalized.state || "").trim().toLowerCase())
+      && !Boolean(largePayload?.up || miniPayload?.up || fleet?.up);
+    const actionContract = buildSwapActionContract(normalized);
+    return {
+      ...normalized,
+      summary_version: 1,
+      current_job_id: _activating ? _activatingJobId || normalized.current_job_id || null : normalized.current_job_id || null,
+      activating: _activating,
+      activating_set_id: _activating ? _activatingSetId || null : null,
+      observed_lane_targets: observed,
+      known_idle: Boolean(normalized.known_idle) || (!_activating && inferredKnownIdle),
+      last_observed_at: currentIso(),
+      ...actionContract,
+    };
+  }
+
+  function buildSwapAdmissionDetails(manifest, overrides = {}) {
+    const normalized = normalizeSwapManifest({
+      ...(manifest || {}),
+      ...(overrides || {}),
+    });
+    const actionContract = buildSwapActionContract(normalized);
+    return {
+      swap_id: normalized.swap_id || "",
+      current_job_id: normalized.current_job_id || "",
+      active_set_id: normalized.canonical_set_id || normalized.requested_set_id || "",
+      controller_epoch: normalized.controller_epoch || controllerEpoch,
+      controller_revision: Number(normalized.controller_revision || 0),
+      swap_state: normalized.state || "",
+      swap_terminal_state: normalized.terminal_state || "",
+      reconcile_needed: Boolean(normalized.reconcile_needed || String(normalized.terminal_state || "") === "reconcile_needed"),
+      ...actionContract,
+    };
+  }
+
+  function buildReadinessLease({ desiredState = {}, swapSummary = {}, job = null } = {}) {
+    const desiredReady = String(desiredState?.state || "").trim().toLowerCase() === "ready";
+    const activeSetId = canonicalActivationSetId(
+      desiredState?.active_set_id
+      || job?.activation_set_id
+      || swapSummary?.canonical_set_id
+      || swapSummary?.requested_set_id
+      || "",
+    );
+    const swapState = String(job?.swap_state || swapSummary?.state || "").trim().toLowerCase();
+    const swapTerminalState = String(job?.swap_terminal_state || swapSummary?.terminal_state || "").trim().toLowerCase();
+    const reconcileNeeded = Boolean(job?.reconcile_needed ?? swapSummary?.reconcile_needed ?? false);
+    const knownIdle = Boolean(job?.known_idle ?? swapSummary?.known_idle ?? false);
+    const currentJobId = String(job?.job_id || swapSummary?.current_job_id || "").trim();
+    const swapId = String(job?.swap_id || swapSummary?.swap_id || currentJobId).trim();
+    const controllerRevision = Number(job?.controller_revision || swapSummary?.controller_revision || 0);
+    const runtimeIncarnationId = String(job?.runtime_incarnation_id || swapSummary?.runtime_incarnation_id || "").trim();
+    if (!desiredReady || !activeSetId || swapState !== "ready" || swapTerminalState !== "ready" || reconcileNeeded || knownIdle) {
+      return null;
+    }
+    const issuedAt = String(job?.updated_at || desiredState?.updated_at || currentIso());
+    return {
+      schema_version: 1,
+      lease_id: [
+        controllerEpoch,
+        controllerRevision,
+        runtimeIncarnationId || "runtime",
+        activeSetId,
+        swapId || currentJobId || "unknown",
+      ].join(":"),
+      activation_set_id: activeSetId,
+      current_job_id: currentJobId || swapId || "",
+      swap_id: swapId || currentJobId || "",
+      controller_epoch: controllerEpoch,
+      controller_revision: controllerRevision,
+      runtime_incarnation_id: runtimeIncarnationId,
+      desired_state: String(desiredState?.state || "").trim(),
+      desired_status_detail: String(desiredState?.status_detail || "").trim(),
+      swap_state: swapState,
+      swap_terminal_state: swapTerminalState,
+      reconcile_needed: reconcileNeeded,
+      known_idle: knownIdle,
+      stage_scope: ["design_loop", "implementation"],
+      fencing_token: [
+        controllerEpoch,
+        controllerRevision,
+        runtimeIncarnationId || "runtime",
+        swapId || currentJobId || "unknown",
+      ].join(":"),
+      issued_at: issuedAt,
+    };
+  }
+
+  function buildJobReadinessLease(job = {}) {
+    const status = String(job?.status || "").trim().toLowerCase();
+    const phase = String(job?.current_phase || "").trim().toLowerCase();
+    if (status !== "ready" || phase !== "ready") {
+      return null;
+    }
+    const activationSetId = canonicalActivationSetId(job?.activation_set_id || job?.requested_profile_id || "");
+    return buildReadinessLease({
+      desiredState: {
+        state: "ready",
+        active_set_id: activationSetId,
+        status_detail: String(job?.status_detail || "").trim(),
+        updated_at: String(job?.updated_at || currentIso()),
+      },
+      swapSummary: {
+        swap_id: String(job?.swap_id || job?.job_id || "").trim(),
+        current_job_id: String(job?.job_id || "").trim(),
+        canonical_set_id: activationSetId,
+        requested_set_id: activationSetId,
+        state: String(job?.swap_state || "ready").trim(),
+        terminal_state: String(job?.swap_terminal_state || "ready").trim(),
+        reconcile_needed: false,
+        known_idle: false,
+        controller_revision: Number(job?.controller_revision || 0),
+        runtime_incarnation_id: String(job?.runtime_incarnation_id || process.pid),
+      },
+      job: {
+        ...job,
+        activation_set_id: activationSetId,
+        reconcile_needed: false,
+        known_idle: false,
+        runtime_incarnation_id: String(job?.runtime_incarnation_id || process.pid),
+      },
+    });
+  }
+
+  function getJobPayload(jobId) {
+    const job = jobs.get(String(jobId || "").trim());
+    if (!job) return null;
+    return {
+      ...job,
+      readiness_lease: buildJobReadinessLease(job),
+    };
+  }
 
   async function saveDesiredState(nextState) {
     return withDesiredStateLock(desiredStateLockPath, () => _saveDesiredStateImpl(nextState));
@@ -454,6 +951,132 @@ export function createRuntime({
       clear: blockingContainers.length === 0 && responsivePorts.length === 0,
       blocking_containers: blockingContainers,
       responsive_ports: responsivePorts,
+    };
+  }
+
+  function parseTaggedJsonLine(text, prefix) {
+    const source = String(text || "");
+    if (!source) return null;
+    const lines = source
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (!line.startsWith(prefix)) continue;
+      const payload = line.slice(prefix.length).trim();
+      if (!payload) continue;
+      try {
+        return JSON.parse(payload);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  function normalizeProofReasonCodes(value) {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean);
+  }
+
+  function parseDrainProof(result) {
+    const parsed = parseTaggedJsonLine(result?.stdout, "LLMCOMMUNE_DRAIN_PROOF=")
+      || parseTaggedJsonLine(result?.stderr, "LLMCOMMUNE_DRAIN_PROOF=");
+    if (!parsed || typeof parsed !== "object") return null;
+    const local = parsed?.local && typeof parsed.local === "object" ? parsed.local : {};
+    const worker = parsed?.worker && typeof parsed.worker === "object" ? parsed.worker : {};
+    return {
+      status: String(parsed.status || "").trim() || "unknown",
+      timeout_s: Number(parsed.timeout_s || 0) || 0,
+      local: {
+        clear: Boolean(local.clear),
+        reason_codes: normalizeProofReasonCodes(local.reason_codes),
+      },
+      worker: {
+        clear: Boolean(worker.clear),
+        reason_codes: normalizeProofReasonCodes(worker.reason_codes),
+      },
+    };
+  }
+
+  function summarizeDrainProof(proof) {
+    if (!proof) return "";
+    const describeSide = (label, side) => {
+      const codes = normalizeProofReasonCodes(side?.reason_codes);
+      return `${label}=${codes.length > 0 ? codes.join(",") : "clear"}`;
+    };
+    return [
+      describeSide("local", proof.local),
+      describeSide("worker", proof.worker),
+    ].join(" ");
+  }
+
+  async function evaluateDualBoxParity({ profile } = {}) {
+    if (!profile) {
+      return {
+        ok: false,
+        status: "failed",
+        reason_codes: ["dual_box_profile_missing"],
+        detail: "dual-box activation was requested without resolved dual-box profile metadata",
+        evidence: {},
+      };
+    }
+    if (!profile.requires_both_boxes) {
+      return {
+        ok: true,
+        status: "not_required",
+        reason_codes: [],
+        detail: "",
+        evidence: {},
+      };
+    }
+    const sparkPath = String(profile?.model_paths?.spark || "").trim();
+    const gx10Path = String(profile?.model_paths?.gx10 || "").trim();
+    const launchCommand = String(profile?.launch_command || "").trim();
+    const backingHosts = Array.isArray(profile?.backing_hosts)
+      ? profile.backing_hosts.map((entry) => String(entry || "").trim()).filter(Boolean)
+      : [];
+    const reasonCodes = [];
+    const detailParts = [];
+    if (!sparkPath) {
+      reasonCodes.push("spark_model_path_unconfigured");
+      detailParts.push("spark model path is not configured");
+    } else if (!(await pathExists(sparkPath))) {
+      reasonCodes.push("spark_model_missing");
+      detailParts.push(`spark model path missing: ${sparkPath}`);
+    }
+    if (!gx10Path) {
+      reasonCodes.push("gx10_model_path_unconfigured");
+      detailParts.push("gx10 model path is not configured");
+    } else if (!(await remotePathExists(gx10Path))) {
+      reasonCodes.push("gx10_model_missing");
+      detailParts.push(`gx10 model path missing: ${gx10Path}`);
+    }
+    if (!(backingHosts.includes("spark") && backingHosts.includes("gx10"))) {
+      reasonCodes.push("backing_hosts_mismatch");
+      detailParts.push("profile backing_hosts must include both spark and gx10");
+    }
+    const workerReachable = await runCommandImpl(`ssh ${workerSshOptions} ${shellQuote(workerSsh)} "exit 0"`, 12000);
+    if (!workerReachable.ok) {
+      reasonCodes.push("worker_unreachable");
+      detailParts.push("gx10-b041 is unreachable");
+    }
+    return {
+      ok: reasonCodes.length === 0,
+      status: reasonCodes.length === 0 ? "passed" : "failed",
+      reason_codes: Array.from(new Set(reasonCodes)),
+      detail: detailParts.join("; "),
+      evidence: {
+        profile_id: String(profile?.profile_id || "").trim(),
+        spark_model_path: sparkPath,
+        gx10_model_path: gx10Path,
+        worker_host: workerSsh,
+        launch_command: launchCommand,
+        backing_hosts: backingHosts,
+      },
     };
   }
 
@@ -644,9 +1267,56 @@ export function createRuntime({
     return (config.profiles || []).find((entry) => String(entry?.profile_id || "") === String(profileId || ""));
   }
 
+  const LEGACY_ACTIVATION_SET_IDS = Object.freeze({
+    inferno: "gemma431",
+  });
+
+  function canonicalActivationSetId(setId) {
+    const normalized = String(setId || "").trim();
+    return LEGACY_ACTIVATION_SET_IDS[normalized] || normalized;
+  }
+
   function activationSetById(config, setId) {
+    const canonicalSetId = canonicalActivationSetId(setId);
     return (config.controller?.activation_sets || [])
-      .find((entry) => String(entry?.set_id || "") === String(setId || ""));
+      .find((entry) => String(entry?.set_id || "") === canonicalSetId);
+  }
+
+  function normalizeLaneTargets(laneTargets = {}) {
+    return {
+      large: String(laneTargets?.large || "").trim(),
+      mini: laneTargets?.mini == null ? "" : String(laneTargets.mini).trim(),
+    };
+  }
+
+  function activationSetIdForLaneTargets(config, laneTargets = {}) {
+    const normalizedTargets = normalizeLaneTargets(laneTargets);
+    const matches = (config.controller?.activation_sets || []).filter((entry) => {
+      const entryTargets = normalizeLaneTargets(entry?.lane_targets || {});
+      return entryTargets.large === normalizedTargets.large && entryTargets.mini === normalizedTargets.mini;
+    });
+    return matches.length === 1 ? String(matches[0]?.set_id || "").trim() : "";
+  }
+
+  function withResolvedActivationSetId(config, desiredState = {}) {
+    const payload = {
+      ...defaultDesiredState(),
+      ...(desiredState || {}),
+      lane_targets: {
+        ...defaultDesiredState().lane_targets,
+        ...(desiredState?.lane_targets || {}),
+      },
+    };
+    const normalizedTargets = normalizeLaneTargets(payload.lane_targets);
+    return {
+      ...payload,
+      lane_targets: {
+        large: normalizedTargets.large,
+        mini: payload?.lane_targets?.mini == null ? payload.lane_targets.mini : normalizedTargets.mini,
+      },
+      active_set_id: activationSetIdForLaneTargets(config, normalizedTargets) || null,
+      schema_version: Number(payload.schema_version || 2),
+    };
   }
 
   function profilePolicy(config, profileId) {
@@ -868,6 +1538,14 @@ export function createRuntime({
       });
     }
 
+    if (!changed && String(desired.state || "") === "ready" && !anyUp) {
+      apply({
+        state: "failed",
+        watchdog_enforce: false,
+        status_detail: desired.status_detail || "ready state lost its active runtime",
+      });
+    }
+
     if (!changed && ["starting", "stopping", "running"].includes(String(desired.state || "")) && !anyUp && ageMs > timeoutMs) {
       apply({
         state: "failed",
@@ -956,6 +1634,13 @@ export function createRuntime({
     const desiredState = normalizedDesired.changed
       ? await saveDesiredState(normalizedDesired.desiredState)
       : normalizedDesired.desiredState;
+    const swapManifest = await loadSwapManifest();
+    const swapSummary = buildSwapSummary(swapManifest, { largePayload, miniPayload, fleet });
+    const readinessLease = buildReadinessLease({
+      desiredState,
+      swapSummary,
+      job: jobs.get(String(swapSummary.current_job_id || "").trim()) || null,
+    });
     return {
       ok: true,
       generated_at: currentIso(),
@@ -971,8 +1656,11 @@ export function createRuntime({
       },
       mini_fleet: fleet,
       desired_state: desiredState,
+      swap: swapSummary,
+      readiness_lease: readinessLease,
       activating: _activating,
       activating_set_id: _activating ? _activatingSetId : null,
+      activating_job_id: _activating ? _activatingJobId || null : null,
       watchdog: {
         service_unit: "llmcommune-watchdog.service",
         controller_service_unit: "llmcommune-controller.service",
@@ -1170,7 +1858,8 @@ export function createRuntime({
             allow_preempt: "optional boolean, default true",
             dry_run: "optional boolean — returns the activation plan without executing",
             override: "optional boolean — required to activate a manual_only_restore profile",
-          }
+          },
+          reconcile_policy: "Blocked while swap.action_policy_state='reconcile_needed'. Inspect /api/llm-host/current for blocked_actions and exit_requirements.",
         },
         activate_set: {
           method: "POST",
@@ -1182,38 +1871,44 @@ export function createRuntime({
             dry_run: "optional boolean — returns the coordinated activation plan without executing",
           },
           activation_sets: activationSets,
+          reconcile_policy: "Blocked while swap.action_policy_state='reconcile_needed' unless force=true is used after operator review.",
         },
         restart: {
           method: "POST",
           path: "/api/llm-host/actions/restart",
           body: {
             lane_id: "required: large or mini"
-          }
+          },
+          reconcile_policy: "Blocked while swap.action_policy_state='reconcile_needed' because restart routes through activation.",
         },
         stop: {
           method: "POST",
           path: "/api/llm-host/actions/stop",
           body: {
             lane_id: "required: large, mini, or all"
-          }
+          },
+          reconcile_policy: "Allowed during reconcile_needed so operators can drain runtime and clear side effects safely.",
         },
         bonzai: {
           method: "POST",
           path: "/bonzai",
           body: {},
-          effect: "Clears mini and fleet state, then launches CoderNext on :8000."
+          effect: "Clears mini and fleet state, then launches CoderNext on :8000.",
+          reconcile_policy: "Blocked while swap.action_policy_state='reconcile_needed' because bonzai routes through activate-set.",
         },
         fleet_up: {
           method: "POST",
           path: "/fleet/up",
           body: {},
-          effect: "Stops the large lane and brings up the default mini fleet: Qwen on spark:7999 plus DeepSeek on gx10:7999."
+          effect: "Stops the large lane and brings up the default mini fleet: Qwen on spark:7999 plus DeepSeek on gx10:7999.",
+          reconcile_policy: "Blocked while swap.action_policy_state='reconcile_needed'.",
         },
         fleet_down: {
           method: "POST",
           path: "/fleet/down",
           body: {},
-          effect: "Stops the mini fleet on both boxes without touching the large lane."
+          effect: "Stops the mini fleet on both boxes without touching the large lane.",
+          reconcile_policy: "Allowed during reconcile_needed to help clear fleet-side runtime effects.",
         }
       },
       runtime_adapters: {
@@ -1310,6 +2005,9 @@ export function createRuntime({
 
   async function stopLane(laneId, { preserveDesiredState = false } = {}) {
     const lane = String(laneId || "").trim().toLowerCase();
+    if (!preserveDesiredState) {
+      _activationGeneration += 1;
+    }
     if (lane === "large") {
       const config = await loadValidatedConfig();
       const largePort = String(config.lanes?.large?.port || 8000);
@@ -1317,6 +2015,10 @@ export function createRuntime({
         `LLMCOMMUNE_LARGE_PORT=${shellQuote(largePort)} bash ${shellQuote(path.join(repoRoot, "scripts", "stop_large_lane.sh"))}`,
         300000,
       );
+      const enrichedResult = (() => {
+        const drainProof = parseDrainProof(result);
+        return drainProof ? { ...result, drain_proof: drainProof } : result;
+      })();
       if (!preserveDesiredState) {
         const desired = await loadDesiredState();
         desired.lane_targets.large = "";
@@ -1328,9 +2030,9 @@ export function createRuntime({
           desired.state = "ready";
         }
         desired.status_detail = "large lane stopped";
-        await saveDesiredState(desired);
+        await saveDesiredState(withResolvedActivationSetId(config, desired));
       }
-      return result;
+      return enrichedResult;
     }
     if (lane === "mini") {
       const config = await loadValidatedConfig();
@@ -1358,8 +2060,8 @@ export function createRuntime({
       return result;
     }
     if (lane === "all") {
-      const first = await stopLane("mini", { preserveDesiredState });
-      const second = await stopLane("large", { preserveDesiredState });
+      const first = await stopLane("mini", { preserveDesiredState: true });
+      const second = await stopLane("large", { preserveDesiredState: true });
       if (!preserveDesiredState) {
         await saveDesiredState(defaultDesiredState());
       }
@@ -1374,6 +2076,9 @@ export function createRuntime({
   }
 
   async function stopFleet({ preserveDesiredState = false } = {}) {
+    if (!preserveDesiredState) {
+      _activationGeneration += 1;
+    }
     const config = await loadValidatedConfig();
     const result = await runCommandImpl(
       `LLMCOMMUNE_MINI_PORT=${shellQuote(String(config.lanes?.mini?.port || 7999))} LLMCOMMUNE_WORKER_MINI_PORT=${shellQuote(String(config.lanes?.mini?.port || 7999))} bash ${shellQuote(path.join(repoRoot, "scripts", "fleet_down.sh"))}`,
@@ -1430,6 +2135,20 @@ export function createRuntime({
     return false;
   }
 
+  function summarizeCommandFailure(result) {
+    const drainProof = parseDrainProof(result);
+    const detail = [
+      String(result?.stderr || "").trim(),
+      String(result?.error || "").trim(),
+      String(result?.stdout || "").trim(),
+    ].find(Boolean);
+    const drainDetail = summarizeDrainProof(drainProof);
+    if (drainDetail) {
+      return [detail, `drain proof ${drainDetail}`].filter(Boolean).join("; ");
+    }
+    return detail || "command failed";
+  }
+
   function setJob(jobId, patch) {
     const current = jobs.get(jobId) || {};
     jobs.set(jobId, {
@@ -1438,6 +2157,63 @@ export function createRuntime({
       updated_at: currentIso(),
       elapsed_s: current.started_at_ms ? Number((((nowMs()) - current.started_at_ms) / 1000).toFixed(1)) : 0,
     });
+  }
+
+  async function abortIfActivationSuperseded({
+    expectedGeneration,
+    jobId,
+    laneId = "",
+    detail = "activation superseded",
+    stopLaneOnAbort = false,
+  } = {}) {
+    if (expectedGeneration === _activationGeneration) return false;
+    if (stopLaneOnAbort && laneId) {
+      await stopLane(laneId, { preserveDesiredState: true });
+    }
+    setJob(jobId, {
+      status: "failed",
+      current_phase: "failed",
+      status_detail: detail,
+      code: ErrorCode.ACTIVATION_SUPERSEDED,
+    });
+    metrics.activations_failed++;
+    await appendJobHistory(jobHistoryPath, jobs.get(jobId));
+    return true;
+  }
+
+  async function supersedeInFlightActivation(requestedSetId = "") {
+    const supersededSetId = String(_activatingSetId || "").trim();
+    const supersededJobId = String(_activatingJobId || "").trim();
+    const supersededPromise = _activatingPromise;
+    _activationGeneration += 1;
+    if (supersededJobId) {
+      setJob(supersededJobId, {
+        status: "running",
+        current_phase: "superseding",
+        status_detail: requestedSetId
+          ? `superseded by activation request for ${requestedSetId}`
+          : "superseding in-flight activation",
+      });
+    }
+    await stopFleet({ preserveDesiredState: true });
+    await stopLane("all", { preserveDesiredState: true });
+    if (supersededPromise) {
+      try {
+        await supersededPromise;
+      } catch {
+        // The superseded activation reports its own failure state.
+      }
+    }
+    if (supersededJobId) {
+      await appendSwapJournal("swap_superseded", {
+        swap_id: supersededJobId,
+        current_job_id: supersededJobId,
+        requested_set_id: supersededSetId,
+        canonical_set_id: supersededSetId,
+        superseded_by_set_id: requestedSetId,
+      });
+    }
+    return { supersededSetId, supersededJobId };
   }
 
   function isLargeActivation(profile, laneId) {
@@ -1466,6 +2242,7 @@ export function createRuntime({
     override = false,
     preserveOtherLane = false,
     otherLaneTarget = "",
+    activationGeneration = _activationGeneration,
   } = {}) {
     const config = await loadValidatedConfig();
     const profile = profileById(config, profileId);
@@ -1480,6 +2257,34 @@ export function createRuntime({
       return {
         ...apiError(ErrorCode.LANE_NOT_ALLOWED, `${profile.profile_id} cannot run on lane ${selectedLane}`),
         accepted: false,
+      };
+    }
+
+    const swapAdmissionState = await loadSwapManifest();
+    const reconcileBlocked = Boolean(
+      swapAdmissionState.reconcile_needed || String(swapAdmissionState.terminal_state || "") === "reconcile_needed",
+    );
+    if (reconcileBlocked && !dryRun) {
+      const blockedDetails = buildSwapAdmissionDetails(swapAdmissionState);
+      await appendAuditLog({
+        action: "activate",
+        profile_id: profile.profile_id,
+        lane_id: selectedLane,
+        ok: false,
+        code: ErrorCode.RECONCILE_REQUIRED,
+        swap_id: blockedDetails.swap_id,
+        controller_revision: blockedDetails.controller_revision,
+        active_set_id: blockedDetails.active_set_id,
+        reason: "swap_reconcile_needed",
+      });
+      return {
+        ...apiError(
+          ErrorCode.RECONCILE_REQUIRED,
+          `controller requires reconcile before admitting profile '${profile.profile_id}' on ${selectedLane}`,
+        ),
+        requested_profile_id: profile.profile_id,
+        lane_id: selectedLane,
+        ...blockedDetails,
       };
     }
 
@@ -1517,14 +2322,14 @@ export function createRuntime({
         }
       }
       await persistLaneState(selectedLane, profile);
-      await saveDesiredState({
+      await saveDesiredState(withResolvedActivationSetId(config, {
         mode: "lane",
         state: "ready",
         watchdog_enforce: true,
         lane_targets: laneTargetsForActivation({ selectedLane, profile, preserveOtherLane, otherLaneTarget }),
         fleet_id: "",
         status_detail: `${profile.profile_id} already active on ${selectedLane}`,
-      });
+      }));
       const adapter = adapterForProfile(config, profile);
       return {
         ok: true,
@@ -1602,7 +2407,7 @@ export function createRuntime({
         const startMs = nowMs();
         try {
           const desiredBefore = await loadDesiredState();
-          await saveDesiredState({
+          await saveDesiredState(withResolvedActivationSetId(config, {
             ...desiredBefore,
             mode: "lane",
             state: "starting",
@@ -1610,30 +2415,75 @@ export function createRuntime({
             lane_targets: laneTargetsForActivation({ selectedLane, profile, preserveOtherLane, otherLaneTarget }),
             fleet_id: "",
             status_detail: `starting ${profile.profile_id} on ${selectedLane}`,
-          });
+          }));
           setJob(jobId, { status: "running", current_phase: "stopping_conflicts" });
           if (allowPreempt) {
-            await stopFleet({ preserveDesiredState: true });
+            const stopResults = [];
+            stopResults.push({ scope: "fleet", result: await stopFleet({ preserveDesiredState: true }) });
             if (selectedLane === "large" && !preserveOtherLane) {
-              await stopLane("mini", { preserveDesiredState: true });
+              stopResults.push({ scope: "mini", result: await stopLane("mini", { preserveDesiredState: true }) });
             } else if (selectedLane === "mini" && !preserveOtherLane) {
-              await stopLane("large", { preserveDesiredState: true });
+              stopResults.push({ scope: "large", result: await stopLane("large", { preserveDesiredState: true }) });
             }
-            await stopLane(selectedLane, { preserveDesiredState: true });
-            setJob(jobId, { current_phase: "stopping_conflicts", status_detail: "waiting for ports to settle" });
-            await sleepImpl(5000);
-          }
-          if (profile.requires_both_boxes) {
-            const postStopWorkerState = await workerClearState(config);
-            if (!postStopWorkerState.clear) {
-              const detail = `worker gx10-b041 is not clear for dual-box launch; containers=${postStopWorkerState.blocking_containers.join(",") || "none"} ports=${postStopWorkerState.responsive_ports.join(",") || "none"}`;
+            stopResults.push({ scope: selectedLane, result: await stopLane(selectedLane, { preserveDesiredState: true }) });
+            const failedStops = stopResults.filter((entry) => !entry.result?.ok);
+            if (failedStops.length > 0) {
+              const detail = `pre-launch stop failed before starting ${profile.profile_id}; ${failedStops.map((entry) => `${entry.scope}: ${summarizeCommandFailure(entry.result)}`).join(" | ")}`;
               const failedDesired = await loadDesiredState();
-              await saveDesiredState({
+              await saveDesiredState(withResolvedActivationSetId(config, {
                 ...failedDesired,
                 state: "failed",
                 watchdog_enforce: false,
                 status_detail: detail,
+              }));
+              logger.error("activate: pre-launch stop failed", {
+                profile_id: profile.profile_id,
+                lane: selectedLane,
+                stop_results: stopResults.map((entry) => ({
+                  scope: entry.scope,
+                  ok: Boolean(entry.result?.ok),
+                  error: String(entry.result?.error || ""),
+                  stderr: String(entry.result?.stderr || ""),
+                })),
               });
+              setJob(jobId, {
+                status: "failed",
+                current_phase: "failed",
+                status_detail: detail,
+                code: ErrorCode.ACTIVATION_FAILED,
+              });
+              metrics.activations_failed++;
+              await appendJobHistory(jobHistoryPath, jobs.get(jobId));
+              return;
+            }
+            setJob(jobId, { current_phase: "stopping_conflicts", status_detail: "waiting for ports to settle" });
+            await sleepImpl(5000);
+          }
+          if (await abortIfActivationSuperseded({
+            expectedGeneration: activationGeneration,
+            jobId,
+            detail: `activation superseded before launching ${profile.profile_id}`,
+          })) {
+            return;
+          }
+          if (profile.requires_both_boxes) {
+            const postStopWorkerState = await workerClearState(config);
+            if (await abortIfActivationSuperseded({
+              expectedGeneration: activationGeneration,
+              jobId,
+              detail: `activation superseded before launching ${profile.profile_id}`,
+            })) {
+              return;
+            }
+            if (!postStopWorkerState.clear) {
+              const detail = `worker gx10-b041 is not clear for dual-box launch; containers=${postStopWorkerState.blocking_containers.join(",") || "none"} ports=${postStopWorkerState.responsive_ports.join(",") || "none"}`;
+              const failedDesired = await loadDesiredState();
+              await saveDesiredState(withResolvedActivationSetId(config, {
+                ...failedDesired,
+                state: "failed",
+                watchdog_enforce: false,
+                status_detail: detail,
+              }));
               setJob(jobId, { status: "failed", current_phase: "failed", status_detail: "worker gx10-b041 is not clear for dual-box launch" });
               metrics.activations_failed++;
               await appendJobHistory(jobHistoryPath, { ...jobs.get(jobId), code: ErrorCode.WORKER_NOT_CLEAR });
@@ -1644,14 +2494,23 @@ export function createRuntime({
           const selectedLanePort = String(config.lanes?.[selectedLane]?.port || 8000);
           const launchCommand = `PORT=${shellQuote(selectedLanePort)} ${profile.launch_command}`;
           const result = await runCommandImpl(launchCommand, (profile.startup_expectation?.ready_timeout_s || 900) * 1000);
+          if (await abortIfActivationSuperseded({
+            expectedGeneration: activationGeneration,
+            jobId,
+            laneId: selectedLane,
+            detail: `activation superseded while starting ${profile.profile_id}`,
+            stopLaneOnAbort: true,
+          })) {
+            return;
+          }
           if (!result.ok) {
             const failedDesired = await loadDesiredState();
-            await saveDesiredState({
+            await saveDesiredState(withResolvedActivationSetId(config, {
               ...failedDesired,
               state: "failed",
               watchdog_enforce: false,
               status_detail: "launch failed",
-            });
+            }));
             logger.error("activate: launch failed", { profile_id: profile.profile_id, lane: selectedLane, stderr: result.stderr });
             setJob(jobId, { status: "failed", current_phase: "failed", status_detail: "launch failed", code: ErrorCode.LAUNCH_FAILED });
             metrics.activations_failed++;
@@ -1661,14 +2520,23 @@ export function createRuntime({
           setJob(jobId, { current_phase: "waiting_for_api" });
           const lanePort = config.lanes?.[selectedLane]?.port || 8000;
           const ready = await waitForReady(lanePort, (profile.startup_expectation?.ready_timeout_s || 900) * 1000);
+          if (await abortIfActivationSuperseded({
+            expectedGeneration: activationGeneration,
+            jobId,
+            laneId: selectedLane,
+            detail: `activation superseded while waiting for ${profile.profile_id}`,
+            stopLaneOnAbort: true,
+          })) {
+            return;
+          }
           if (!ready) {
             const failedDesired = await loadDesiredState();
-            await saveDesiredState({
+            await saveDesiredState(withResolvedActivationSetId(config, {
               ...failedDesired,
               state: "failed",
               watchdog_enforce: false,
               status_detail: "runtime did not become ready",
-            });
+            }));
             setJob(jobId, { status: "failed", current_phase: "failed", status_detail: "runtime did not become ready", code: ErrorCode.ACTIVATION_TIMEOUT });
             metrics.activations_failed++;
             await appendJobHistory(jobHistoryPath, jobs.get(jobId));
@@ -1676,7 +2544,7 @@ export function createRuntime({
           }
           await persistLaneState(selectedLane, profile);
           const readyDesired = await loadDesiredState();
-          await saveDesiredState({
+          await saveDesiredState(withResolvedActivationSetId(config, {
             ...readyDesired,
             mode: "lane",
             state: "ready",
@@ -1684,7 +2552,7 @@ export function createRuntime({
             lane_targets: laneTargetsForActivation({ selectedLane, profile, preserveOtherLane, otherLaneTarget }),
             fleet_id: "",
             status_detail: `${profile.profile_id} ready on ${selectedLane}`,
-          });
+          }));
           setJob(jobId, { status: "ready", current_phase: "ready", status_detail: "runtime ready" });
           metrics.activations_ready++;
           metrics.activation_duration_ms.push(nowMs() - startMs);
@@ -1693,12 +2561,12 @@ export function createRuntime({
           await fireWebhook("activation_ready", { profile_id: profile.profile_id, lane_id: selectedLane });
         } catch (error) {
           const failedDesired = await loadDesiredState();
-          await saveDesiredState({
+          await saveDesiredState(withResolvedActivationSetId(config, {
             ...failedDesired,
             state: "failed",
             watchdog_enforce: false,
             status_detail: "activation failed",
-          });
+          }));
           logger.error("activate: unexpected error", { profile_id: profile.profile_id, error: String(error?.message || error) });
           setJob(jobId, { status: "failed", current_phase: "failed", status_detail: "activation failed", code: ErrorCode.INTERNAL_ERROR });
           metrics.activations_failed++;
@@ -1735,17 +2603,69 @@ export function createRuntime({
   }
 
   async function activateSet({ setId, wait = false, allowPreempt = true, dryRun = false, force = false } = {}) {
+    setId = canonicalActivationSetId(setId);
+    let supersededActivation = false;
+
     // ── Activation lock: one set activation at a time ────────────────────
     if (_activating) {
       const eta = new Date(_activatingStartMs + 300000).toISOString();
-      return {
-        ok: false,
-        accepted: false,
-        code: ErrorCode.CONCURRENT_ACTIVATION,
-        detail: `activation in progress for set '${_activatingSetId}' — try again later`,
-        active_set_id: _activatingSetId,
-        estimated_ready_at: eta,
-      };
+      if (String(_activatingSetId || "") === String(setId || "") && _activatingJobId) {
+        if (wait && _activatingPromise) {
+          await _activatingPromise;
+        }
+        const attachedJob = jobs.get(_activatingJobId);
+        if (attachedJob) {
+          const currentSwap = await loadSwapManifest();
+          const attachedDetails = buildSwapAdmissionDetails(currentSwap, {
+            current_job_id: _activatingJobId || currentSwap.current_job_id || "",
+          });
+          await appendSwapJournal("swap_attached", {
+            swap_id: attachedDetails.swap_id || attachedJob.swap_id || _activatingJobId,
+            current_job_id: _activatingJobId,
+            requested_set_id: setId,
+            canonical_set_id: setId,
+            controller_revision: attachedDetails.controller_revision,
+            state: attachedDetails.swap_state,
+            terminal_state: attachedDetails.swap_terminal_state,
+          });
+          return {
+            ok: true,
+            accepted: true,
+            attached: true,
+            active_set_id: _activatingSetId,
+            estimated_ready_at: eta,
+            ...attachedJob,
+            ...attachedDetails,
+          };
+        }
+      }
+      if (!allowPreempt) {
+        const currentSwap = await loadSwapManifest();
+        const conflictDetails = buildSwapAdmissionDetails(currentSwap, {
+          current_job_id: _activatingJobId || currentSwap.current_job_id || "",
+        });
+        await appendSwapJournal("swap_rejected_conflict", {
+          swap_id: conflictDetails.swap_id || _activatingJobId || "",
+          current_job_id: conflictDetails.current_job_id || _activatingJobId || "",
+          requested_set_id: setId,
+          canonical_set_id: setId,
+          controller_revision: conflictDetails.controller_revision,
+          state: conflictDetails.swap_state,
+          terminal_state: conflictDetails.swap_terminal_state,
+          conflicting_set_id: _activatingSetId,
+        });
+        return {
+          ok: false,
+          accepted: false,
+          code: ErrorCode.CONCURRENT_ACTIVATION,
+          detail: `activation in progress for set '${_activatingSetId}' — try again later`,
+          active_set_id: _activatingSetId,
+          estimated_ready_at: eta,
+          ...conflictDetails,
+        };
+      }
+      await supersedeInFlightActivation(setId);
+      supersededActivation = true;
     }
     const config = await loadValidatedConfig();
 
@@ -1759,6 +2679,31 @@ export function createRuntime({
       return { ...apiError(ErrorCode.SET_NOT_FOUND, `unknown activation set '${setId}'`), accepted: false };
     }
 
+    const swapAdmissionState = await loadSwapManifest();
+    const reconcileBlocked = Boolean(
+      swapAdmissionState.reconcile_needed || String(swapAdmissionState.terminal_state || "") === "reconcile_needed",
+    );
+    if (reconcileBlocked && !force && !dryRun && !supersededActivation) {
+      const blockedDetails = buildSwapAdmissionDetails(swapAdmissionState);
+      await appendAuditLog({
+        action: "activate-set",
+        set_id: setId,
+        ok: false,
+        code: ErrorCode.RECONCILE_REQUIRED,
+        swap_id: blockedDetails.swap_id,
+        controller_revision: blockedDetails.controller_revision,
+        active_set_id: blockedDetails.active_set_id,
+        reason: "swap_reconcile_needed",
+      });
+      return {
+        ...apiError(
+          ErrorCode.RECONCILE_REQUIRED,
+          `controller requires reconcile before admitting set '${setId}' — resolve or force the active swap first`,
+        ),
+        ...blockedDetails,
+      };
+    }
+
     // ── Idempotency: skip if already active and healthy ───────────────────────
     if (!force && !dryRun) {
       const existingState = await loadDesiredState();
@@ -1769,6 +2714,31 @@ export function createRuntime({
             signal: AbortSignal.timeout(5000),
           });
           if (healthResp.ok) {
+            const healthyCurrent = await currentState();
+            const skipLargeProfileId = String(activationSet?.lane_targets?.large || "").trim();
+            const skipMiniProfileId = String(activationSet?.lane_targets?.mini || "").trim();
+            const skipLargeProfile = skipLargeProfileId ? profileById(config, skipLargeProfileId) : null;
+            await recordSwapTransition("", "swap_ready", {
+              requested_set_id: setId,
+              canonical_set_id: setId,
+              state: "ready",
+              terminal_state: "ready",
+              phase_started_at: currentIso(),
+              desired_lane_targets: {
+                large: skipLargeProfileId,
+                mini: skipMiniProfileId || "",
+              },
+              observed_lane_targets: observedLaneTargetsFromPayloads(healthyCurrent?.lanes?.large, healthyCurrent?.lanes?.mini),
+              parity_status: skipLargeProfile?.requires_both_boxes ? "passed" : "not_required",
+              drain_status: "complete",
+              readiness_status: "ready",
+              known_idle: false,
+              reconcile_needed: false,
+              evidence_status: "minimal",
+              evidence_refs: [],
+              failure_code: "",
+              failure_detail: "",
+            });
             logger.info("activate-set: idempotent skip", { set_id: setId });
             return {
               ok: true,
@@ -1777,6 +2747,7 @@ export function createRuntime({
               set_id: setId,
               detail: `set '${setId}' is already active and healthy`,
               skipped: true,
+              readiness_lease: healthyCurrent.readiness_lease || null,
             };
           }
         } catch { /* health check failed — proceed with full activation */ }
@@ -1784,7 +2755,7 @@ export function createRuntime({
     }
 
     // Rate limit: 30s cooldown after last completed activation (skipped for same set)
-    if (!force && _lastActivationCompletedMs > 0) {
+    if (!force && !supersededActivation && _lastActivationCompletedMs > 0) {
       const sinceLast = Date.now() - _lastActivationCompletedMs;
       if (sinceLast < ACTIVATION_COOLDOWN_MS) {
         const eta = new Date(_lastActivationCompletedMs + ACTIVATION_COOLDOWN_MS).toISOString();
@@ -1842,16 +2813,37 @@ export function createRuntime({
       };
     }
 
-    // ── Dual-box reachability pre-check (fail fast before stopping anything) ──
-    if (activationSet.requires_dual_box) {
-      const gx10Check = await runCommandImpl(`ssh ${workerSshOptions} ${shellQuote(workerSsh)} "exit 0"`, 12000);
-      if (!gx10Check.ok) {
-        logger.warn("activate-set: gx10-b041 unreachable for dual-box set", { set_id: setId });
-        return {
-          ...apiError(ErrorCode.HARDWARE_UNAVAILABLE, `set '${setId}' requires dual-box but gx10-b041 is unreachable`),
-          accepted: false,
-        };
-      }
+    const requiresDualBox = Boolean(
+      activationSet.requires_dual_box || largeProfile?.requires_both_boxes || miniProfile?.requires_both_boxes,
+    );
+    const dualBoxProfile = largeProfile?.requires_both_boxes ? largeProfile : miniProfile?.requires_both_boxes ? miniProfile : null;
+    const dualBoxParity = requiresDualBox
+      ? await evaluateDualBoxParity({ profile: dualBoxProfile })
+      : {
+        ok: true,
+        status: "not_required",
+        reason_codes: [],
+        detail: "",
+        evidence: {},
+      };
+    if (!dryRun && !dualBoxParity.ok) {
+      logger.warn("activate-set: dual-box parity failed", {
+        set_id: setId,
+        reason_codes: dualBoxParity.reason_codes,
+        detail: dualBoxParity.detail,
+      });
+      return {
+        ...apiError(
+          ErrorCode.HARDWARE_UNAVAILABLE,
+          `set '${setId}' failed dual-box parity preflight — ${dualBoxParity.detail || "required Spark and GX10 assets are not aligned"}`,
+        ),
+        accepted: false,
+        set_id: setId,
+        parity_status: dualBoxParity.status,
+        parity_reason_codes: dualBoxParity.reason_codes,
+        parity_detail: dualBoxParity.detail,
+        parity_evidence: dualBoxParity.evidence,
+      };
     }
 
     if (dryRun) {
@@ -1872,6 +2864,12 @@ export function createRuntime({
             large: largeProfile?.startup_expectation || null,
             mini: miniProfile?.startup_expectation || null,
           },
+          parity: {
+            status: dualBoxParity.status,
+            reason_codes: dualBoxParity.reason_codes,
+            detail: dualBoxParity.detail,
+            evidence: dualBoxParity.evidence,
+          },
         },
       };
     }
@@ -1880,7 +2878,9 @@ export function createRuntime({
     _activatingSetId = setId;
     _activatingStartMs = nowMs();
     const _activationSetStartMs = nowMs();
+    const activationGeneration = _activationGeneration;
     const jobId = uuid();
+    _activatingJobId = jobId;
     const job = {
       ok: true,
       accepted: true,
@@ -1893,6 +2893,7 @@ export function createRuntime({
         mini: miniProfile ? adapterForProfile(config, miniProfile) : null,
       },
       expected_catalog_url: largeProfile ? adapterForProfile(config, largeProfile).models_url : miniProfile ? adapterForProfile(config, miniProfile).models_url : "",
+      activation_set_id: String(activationSet.set_id || ""),
       startup_expectation: {
         large: largeProfile?.startup_expectation || null,
         mini: miniProfile?.startup_expectation || null,
@@ -1901,51 +2902,251 @@ export function createRuntime({
       status: "queued",
       started_at_ms: nowMs(),
       updated_at: currentIso(),
+      swap_id: jobId,
+      controller_epoch: controllerEpoch,
+      controller_revision: 0,
+      swap_state: "preflight",
+      swap_terminal_state: "",
     };
     jobs.set(jobId, job);
+    const initialSwap = await recordSwapTransition(jobId, "swap_requested", {
+      swap_id: jobId,
+      current_job_id: jobId,
+      requested_set_id: setId,
+      canonical_set_id: setId,
+      requested_generation: activationGeneration,
+      observed_generation: activationGeneration,
+      state: "preflight",
+      terminal_state: "",
+      started_at: currentIso(),
+      phase_started_at: currentIso(),
+      desired_lane_targets: {
+        large: largeProfileId,
+        mini: miniProfileId || "",
+      },
+      observed_lane_targets: {
+        large: "",
+        mini: "",
+      },
+        parity_status: dualBoxParity.status,
+      drain_status: "pending",
+      readiness_status: "pending",
+      known_idle: false,
+      reconcile_needed: false,
+      evidence_status: "pending",
+      evidence_refs: [],
+      failure_code: "",
+      failure_detail: "",
+    }, {
+      allow_preempt: Boolean(allowPreempt),
+      superseded_activation: Boolean(supersededActivation),
+    });
+    setJob(jobId, {
+      controller_revision: initialSwap.controller_revision,
+    });
+    let activeSwap = initialSwap;
 
     const launch = async () => {
       try {
         if (largeProfile) {
+          const largeStart = await recordSwapTransition(jobId, "swap_start_started", {
+            state: "starting",
+            phase_started_at: currentIso(),
+            current_job_id: jobId,
+              parity_status: dualBoxParity.status,
+            drain_status: "pending",
+            readiness_status: "pending",
+            known_idle: false,
+            reconcile_needed: false,
+          }, {
+            phase: "activating_large",
+            profile_id: largeProfile.profile_id,
+          }, {
+            expectedControllerRevision: activeSwap.controller_revision,
+            expectedSwapId: activeSwap.swap_id,
+            expectedCurrentJobId: activeSwap.current_job_id || jobId,
+          });
+          if (swapTransitionRejected(largeStart)) {
+            const detail = swapTransitionConflictDetail(largeStart, `swap start rejected before activating ${largeProfile.profile_id}`);
+            setJob(jobId, {
+              status: "failed",
+              current_phase: "failed",
+              status_detail: detail,
+              code: ErrorCode.REVISION_CONFLICT,
+              controller_revision: largeStart.controller_revision,
+            });
+            return;
+          }
+          activeSwap = largeStart;
           setJob(jobId, { status: "running", current_phase: "activating_large", status_detail: `starting ${largeProfile.profile_id} on large` });
+          setJob(jobId, { controller_revision: largeStart.controller_revision });
           const largeResult = await activate({
             profileId: largeProfile.profile_id,
             laneId: "large",
             wait: true,
             allowPreempt,
+            override: true,
             preserveOtherLane: Boolean(miniProfile),
             otherLaneTarget: miniProfile?.profile_id || "",
+            activationGeneration,
           });
           if (String(largeResult?.status || "") !== "ready") {
+            const failedCurrent = await currentState();
+            const failedClassification = classifySwapFailureState({
+              current: failedCurrent,
+              failureCode: largeResult?.code || ErrorCode.INTERNAL_ERROR,
+              failureDetail: largeResult?.status_detail || `failed to activate ${largeProfile.profile_id}`,
+            });
+            const failedSwap = await recordSwapTransition(jobId, failedClassification.eventType, {
+              state: failedClassification.state,
+              terminal_state: failedClassification.terminal_state,
+              phase_started_at: currentIso(),
+              current_job_id: jobId,
+              readiness_status: failedClassification.readiness_status,
+              known_idle: failedClassification.known_idle,
+              reconcile_needed: failedClassification.reconcile_needed,
+              evidence_status: failedClassification.evidence_status,
+              observed_lane_targets: failedClassification.observed_lane_targets,
+              failure_code: failedClassification.failure_code,
+              failure_detail: failedClassification.failure_detail,
+            }, {
+              phase: "activating_large",
+              profile_id: largeProfile.profile_id,
+            }, {
+              expectedControllerRevision: activeSwap.controller_revision,
+              expectedSwapId: activeSwap.swap_id,
+              expectedCurrentJobId: activeSwap.current_job_id || jobId,
+            });
+            if (swapTransitionRejected(failedSwap)) {
+              const detail = swapTransitionConflictDetail(failedSwap, `swap failure classification rejected after activating ${largeProfile.profile_id}`);
+              setJob(jobId, {
+                status: "failed",
+                current_phase: "failed",
+                status_detail: detail,
+                code: ErrorCode.REVISION_CONFLICT,
+                controller_revision: failedSwap.controller_revision,
+              });
+              return;
+            }
             setJob(jobId, {
               status: "failed",
               current_phase: "failed",
               status_detail: largeResult?.status_detail || `failed to activate ${largeProfile.profile_id}`,
               code: largeResult?.code || ErrorCode.INTERNAL_ERROR,
+              controller_revision: failedSwap.controller_revision,
             });
             return;
           }
         }
 
+        if (activationGeneration !== _activationGeneration) {
+          setJob(jobId, {
+            status: "failed",
+            current_phase: "failed",
+            status_detail: "activation set superseded",
+            code: ErrorCode.ACTIVATION_SUPERSEDED,
+          });
+          return;
+        }
+
         if (miniProfile) {
+          const miniStart = await recordSwapTransition(jobId, "swap_start_started", {
+            state: "starting",
+            phase_started_at: currentIso(),
+            current_job_id: jobId,
+            drain_status: "complete",
+            readiness_status: "pending",
+            known_idle: false,
+            reconcile_needed: false,
+          }, {
+            phase: "activating_mini",
+            profile_id: miniProfile.profile_id,
+          }, {
+            expectedControllerRevision: activeSwap.controller_revision,
+            expectedSwapId: activeSwap.swap_id,
+            expectedCurrentJobId: activeSwap.current_job_id || jobId,
+          });
+          if (swapTransitionRejected(miniStart)) {
+            const detail = swapTransitionConflictDetail(miniStart, `swap start rejected before activating ${miniProfile.profile_id}`);
+            setJob(jobId, {
+              status: "failed",
+              current_phase: "failed",
+              status_detail: detail,
+              code: ErrorCode.REVISION_CONFLICT,
+              controller_revision: miniStart.controller_revision,
+            });
+            return;
+          }
+          activeSwap = miniStart;
           setJob(jobId, { status: "running", current_phase: "activating_mini", status_detail: `starting ${miniProfile.profile_id} on mini` });
+          setJob(jobId, { controller_revision: miniStart.controller_revision });
           const miniResult = await activate({
             profileId: miniProfile.profile_id,
             laneId: "mini",
             wait: true,
             allowPreempt,
+            override: true,
             preserveOtherLane: Boolean(largeProfile),
             otherLaneTarget: largeProfile?.profile_id || "",
+            activationGeneration,
           });
           if (String(miniResult?.status || "") !== "ready") {
+            const failedCurrent = await currentState();
+            const failedClassification = classifySwapFailureState({
+              current: failedCurrent,
+              failureCode: miniResult?.code || ErrorCode.INTERNAL_ERROR,
+              failureDetail: miniResult?.status_detail || `failed to activate ${miniProfile.profile_id}`,
+            });
+            const failedSwap = await recordSwapTransition(jobId, failedClassification.eventType, {
+              state: failedClassification.state,
+              terminal_state: failedClassification.terminal_state,
+              phase_started_at: currentIso(),
+              current_job_id: jobId,
+              readiness_status: failedClassification.readiness_status,
+              known_idle: failedClassification.known_idle,
+              reconcile_needed: failedClassification.reconcile_needed,
+              evidence_status: failedClassification.evidence_status,
+              observed_lane_targets: failedClassification.observed_lane_targets,
+              failure_code: failedClassification.failure_code,
+              failure_detail: failedClassification.failure_detail,
+            }, {
+              phase: "activating_mini",
+              profile_id: miniProfile.profile_id,
+            }, {
+              expectedControllerRevision: activeSwap.controller_revision,
+              expectedSwapId: activeSwap.swap_id,
+              expectedCurrentJobId: activeSwap.current_job_id || jobId,
+            });
+            if (swapTransitionRejected(failedSwap)) {
+              const detail = swapTransitionConflictDetail(failedSwap, `swap failure classification rejected after activating ${miniProfile.profile_id}`);
+              setJob(jobId, {
+                status: "failed",
+                current_phase: "failed",
+                status_detail: detail,
+                code: ErrorCode.REVISION_CONFLICT,
+                controller_revision: failedSwap.controller_revision,
+              });
+              return;
+            }
             setJob(jobId, {
               status: "failed",
               current_phase: "failed",
               status_detail: miniResult?.status_detail || `failed to activate ${miniProfile.profile_id}`,
               code: miniResult?.code || ErrorCode.INTERNAL_ERROR,
+              controller_revision: failedSwap.controller_revision,
             });
             return;
           }
+        }
+
+        if (activationGeneration !== _activationGeneration) {
+          setJob(jobId, {
+            status: "failed",
+            current_phase: "failed",
+            status_detail: "activation set superseded",
+            code: ErrorCode.ACTIVATION_SUPERSEDED,
+          });
+          return;
         }
 
         const laneTargets = {
@@ -1967,31 +3168,106 @@ export function createRuntime({
               ? `${largeProfileId} ready on large`
               : `${miniProfileId} ready on mini`,
         });
+        const readyCurrent = await currentState();
+        const readySwap = await recordSwapTransition(jobId, "swap_ready", {
+          state: "ready",
+          terminal_state: "ready",
+          phase_started_at: currentIso(),
+          current_job_id: jobId,
+          observed_generation: activationGeneration,
+          desired_lane_targets: {
+            large: largeProfileId,
+            mini: miniProfileId || "",
+          },
+          observed_lane_targets: observedLaneTargetsFromPayloads(readyCurrent?.lanes?.large, readyCurrent?.lanes?.mini),
+          parity_status: largeProfile?.requires_both_boxes ? "passed" : "not_required",
+          drain_status: "complete",
+          readiness_status: "ready",
+          known_idle: false,
+          reconcile_needed: false,
+          evidence_status: "minimal",
+          evidence_refs: [],
+          failure_code: "",
+          failure_detail: "",
+        }, {}, {
+          expectedControllerRevision: activeSwap.controller_revision,
+          expectedSwapId: activeSwap.swap_id,
+          expectedCurrentJobId: activeSwap.current_job_id || jobId,
+        });
+        if (swapTransitionRejected(readySwap)) {
+          const detail = swapTransitionConflictDetail(readySwap, "swap ready classification rejected after controller ownership changed");
+          setJob(jobId, {
+            status: "failed",
+            current_phase: "failed",
+            status_detail: detail,
+            code: ErrorCode.REVISION_CONFLICT,
+            controller_revision: readySwap.controller_revision,
+          });
+          return;
+        }
         setJob(jobId, { status: "ready", current_phase: "ready", status_detail: "activation set ready" });
+        setJob(jobId, { controller_revision: readySwap.controller_revision });
         await appendAuditLog({ action: "activate-set", set_id: setId, ok: true, elapsed_ms: nowMs() - _activationSetStartMs });
       } catch (error) {
         const _errDetail = String(error?.message || error || "activation set failed");
+        const failedCurrent = await currentState();
+        const failedClassification = classifySwapFailureState({
+          current: failedCurrent,
+          failureCode: ErrorCode.INTERNAL_ERROR,
+          failureDetail: _errDetail,
+        });
+        const failedSwap = await recordSwapTransition(jobId, failedClassification.eventType, {
+          state: failedClassification.state,
+          terminal_state: failedClassification.terminal_state,
+          phase_started_at: currentIso(),
+          current_job_id: jobId,
+          readiness_status: failedClassification.readiness_status,
+          known_idle: failedClassification.known_idle,
+          reconcile_needed: failedClassification.reconcile_needed,
+          evidence_status: failedClassification.evidence_status,
+          observed_lane_targets: failedClassification.observed_lane_targets,
+          failure_code: failedClassification.failure_code,
+          failure_detail: failedClassification.failure_detail,
+        }, {}, {
+          expectedControllerRevision: activeSwap.controller_revision,
+          expectedSwapId: activeSwap.swap_id,
+          expectedCurrentJobId: activeSwap.current_job_id || jobId,
+        });
+        if (swapTransitionRejected(failedSwap)) {
+          setJob(jobId, {
+            status: "failed",
+            current_phase: "failed",
+            status_detail: swapTransitionConflictDetail(failedSwap, _errDetail),
+            code: ErrorCode.REVISION_CONFLICT,
+            controller_revision: failedSwap.controller_revision,
+          });
+          await appendAuditLog({ action: "activate-set", set_id: setId, ok: false, error: swapTransitionConflictDetail(failedSwap, _errDetail), elapsed_ms: nowMs() - _activationSetStartMs });
+          return;
+        }
         setJob(jobId, {
           status: "failed",
           current_phase: "failed",
           status_detail: _errDetail,
           code: ErrorCode.INTERNAL_ERROR,
+          controller_revision: failedSwap.controller_revision,
         });
         await appendAuditLog({ action: "activate-set", set_id: setId, ok: false, error: _errDetail, elapsed_ms: nowMs() - _activationSetStartMs });
         logger.error("activateSet: unexpected error", { set_id: setId, error: _errDetail });
       } finally {
         _activating = false;
         _activatingSetId = "";
+        _activatingJobId = "";
+        _activatingPromise = null;
         _lastActivationCompletedMs = Date.now();
       }
     };
 
+    _activatingPromise = launch();
     if (wait) {
-      await launch();
-      return jobs.get(jobId);
+      await _activatingPromise;
+      return getJobPayload(jobId);
     }
-    launch();
-    return jobs.get(jobId);
+    return getJobPayload(jobId);
   }
 
   /** Fire a webhook event if LLMCOMMUNE_WEBHOOK_URL is set. Never throws. */
@@ -2513,16 +3789,19 @@ export function createRuntime({
   const CATALOG_FAMILY_META = Object.freeze({
     qwen80next: { display_name: "Qwen3 Next 80B" },
     qwen80nextcoder: { display_name: "CoderNext" },
-    gemma431: { display_name: "Gemma 4 31B" },
+    gemma431: { display_name: "Gemma 4 31B GGUF" },
     gptoss120: { display_name: "GPT-OSS 120B" },
     gptoss20: { display_name: "GPT-OSS 20B" },
     qwen36: { display_name: "Qwen3.6 35B" },
+    qwen36mini: { display_name: "Qwen3.6 35B Reviewer" },
     "qwen35-122b": { display_name: "Qwen3.5 122B" },
     "minimax-m27": { display_name: "MiniMax M2.7" },
     qwen235: { display_name: "Qwen3 235B" },
     llama370: { display_name: "Llama 3.3 70B" },
     nemotron120: { display_name: "Nemotron 3 Super 120B" },
-    gemma431mini: { display_name: "Gemma 4 31B Reviewer" },
+    gemma431mini: { display_name: "Gemma 4 31B GGUF Reviewer" },
+    gemma426: { display_name: "Gemma 4 26B A4B" },
+    gemma426mini: { display_name: "Gemma 4 26B A4B Reviewer" },
     qwen30mini: { display_name: "Qwen3 30B Mini" },
     qwen32mini: { display_name: "Qwen3 32B Mini" },
     deepseek32mini: { display_name: "DeepSeek 32B Mini" },
@@ -2535,9 +3814,9 @@ export function createRuntime({
   ]));
 
   const CANDIDATE_COMBO_SPECS = Object.freeze([
-    { family_id: "qwen36", mini_family_id: "gemma431mini", recommendation_state: "promote_next" },
-    { family_id: "gptoss120", mini_family_id: "gemma431mini", recommendation_state: "promote_next" },
-    { family_id: "qwen35-122b", mini_family_id: "gemma431mini", recommendation_state: "available_bench" },
+    { family_id: "qwen36", mini_family_id: "gemma426", recommendation_state: "promote_next" },
+    { family_id: "gptoss120", mini_family_id: "gemma426", recommendation_state: "promote_next" },
+    { family_id: "qwen35-122b", mini_family_id: "gemma426", recommendation_state: "available_bench" },
   ]);
 
   function catalogFamilyDisplayName(familyId) {
@@ -2581,6 +3860,7 @@ export function createRuntime({
     if (!blob) return "";
     if (blob.includes("qwen3codernext") || blob.includes("codernext")) return "qwen80nextcoder";
     if (blob.includes("qwen3next80b") || blob.includes("qwen3next80ba3b") || blob.includes("qwen80next")) return "qwen80next";
+    if (blob.includes("qwen36mini") || blob.includes("qwen3.635bggufmini") || blob.includes("qwen36_35b_mini") || blob.includes("gguf_qwen36_35b_mini")) return "qwen36mini";
     if (blob.includes("qwen3.635b") || blob.includes("qwen3635b") || blob.includes("qwen36_35b")) return "qwen36";
     if (blob.includes("qwen3.5122b") || blob.includes("qwen35122b") || blob.includes("qwen35_122b")) return "qwen35-122b";
     if (blob.includes("qwen323bnvfp4") || blob.includes("qwen332bnvfp4") || blob.includes("qwen32mini")) return "qwen32mini";
@@ -2588,6 +3868,7 @@ export function createRuntime({
     if (blob.includes("qwen3235b") || blob.includes("qwen235")) return "qwen235";
     if (blob.includes("gptoss120b")) return "gptoss120";
     if (blob.includes("gptoss20b")) return "gptoss20";
+    if (blob.includes("gemma426ba4b") || blob.includes("gemma426") || blob.includes("gemma4-26b-a4b") || blob.includes("gguf_gemma4_26b_a4b")) return "gemma426";
     if (blob.includes("gemma431b")) return "gemma431";
     if (blob.includes("deepseekr132b") || blob.includes("deepseek32")) return "deepseek32mini";
     if (blob.includes("llama3.370b") || blob.includes("llama3370b") || blob.includes("llama370")) return "llama370";
@@ -2606,6 +3887,7 @@ export function createRuntime({
 
   function catalogActivationTargetToken(familyId, lane = "large") {
     if (lane === "mini" && familyId === "gemma431") return "gemma431mini";
+    if (lane === "mini" && familyId === "gemma426") return "gemma426mini";
     return familyId;
   }
 
@@ -3537,6 +4819,27 @@ export function createRuntime({
   }
 
   async function fleetUp({ wait = false } = {}) {
+    const swapAdmissionState = await loadSwapManifest();
+    const blockedDetails = buildSwapAdmissionDetails(swapAdmissionState);
+    if (Array.isArray(blockedDetails.blocked_actions) && blockedDetails.blocked_actions.some((entry) => entry.action === "fleet_up")) {
+      await appendAuditLog({
+        action: "fleet-up",
+        ok: false,
+        code: ErrorCode.RECONCILE_REQUIRED,
+        swap_id: blockedDetails.swap_id,
+        controller_revision: blockedDetails.controller_revision,
+        active_set_id: blockedDetails.active_set_id,
+        reason: "swap_reconcile_needed",
+      });
+      return {
+        ...apiError(
+          ErrorCode.RECONCILE_REQUIRED,
+          "controller requires reconcile before bringing the fleet up",
+        ),
+        accepted: false,
+        ...blockedDetails,
+      };
+    }
     const config = await loadValidatedConfig();
     const fleet = Array.isArray(config.fleet_profiles) ? config.fleet_profiles[0] || null : null;
     if (!fleet) {
@@ -3897,7 +5200,7 @@ export function createRuntime({
     metricsText,
     startupChecks,
     getJob(jobId) {
-      const job = jobs.get(String(jobId || "").trim());
+      const job = getJobPayload(jobId);
       if (!job) return { ...apiError(ErrorCode.JOB_NOT_FOUND, "job not found"), ok: false };
       return { ok: true, ...job };
     },

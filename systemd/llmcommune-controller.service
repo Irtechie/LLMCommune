@@ -1,15 +1,27 @@
 [Unit]
-Description=LLMCommune controller on :4000
+Description=LLMCommune controller on :4000 with control room on :8001
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+User=admin
+Group=admin
 WorkingDirectory=/home/admin/apps/LLMCommune
 Environment=PORT=4000
+Environment=LLMCOMMUNE_UI_PORT=8001
+Environment=LOG_LEVEL=info
 ExecStart=/usr/bin/node /home/admin/apps/LLMCommune/src/index.js
 Restart=always
-RestartSec=2
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=35
+MemoryMax=512M
+TasksMax=64
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/home/admin/apps/LLMCommune/workspace
 StandardOutput=append:/home/admin/apps/LLMCommune/workspace/runtime/controller-4000.log
 StandardError=append:/home/admin/apps/LLMCommune/workspace/runtime/controller-4000.log
 

@@ -4,14 +4,28 @@ After=network-online.target llmcommune-controller.service
 Wants=network-online.target llmcommune-controller.service
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+User=admin
+Group=admin
 WorkingDirectory=/home/admin/apps/LLMCommune
 Environment=PORT=4000
+Environment=CONTROLLER_HOST=192.168.1.203
 Environment=WATCHDOG_POLL_MS=5000
 Environment=WATCHDOG_ACTION_COOLDOWN_MS=30000
+Environment=LOG_LEVEL=info
 ExecStart=/usr/bin/node /home/admin/apps/LLMCommune/src/watchdog.js
 Restart=always
 RestartSec=5
+TimeoutStartSec=15
+TimeoutStopSec=10
+MemoryMax=128M
+TasksMax=32
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/home/admin/apps/LLMCommune/workspace
 StandardOutput=append:/home/admin/apps/LLMCommune/workspace/runtime/watchdog-4000.log
 StandardError=append:/home/admin/apps/LLMCommune/workspace/runtime/watchdog-4000.log
 

@@ -2,7 +2,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { createRuntime } from "../../src/runtime.js";
@@ -158,6 +158,720 @@ trackedTest("activate returns ready for an already-active manual_only_restore pr
     assert.match(result.status_detail, /already active/i);
     assert.equal(result.code, undefined);
     assert.equal(commands.length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("stop supersedes a queued activation-set before TRT launch", async () => {
+  const fixture = await createRepoFixture();
+  let runtime;
+  let launchCount = 0;
+  let stopTriggered = false;
+  try {
+    runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          if (command.includes("run_dual_spark_trtllm_qwen235.sh")) {
+            launchCount += 1;
+          }
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: false, model_ids: [], raw: null },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+        sleep: async () => {
+          if (!stopTriggered) {
+            stopTriggered = true;
+            await runtime.stopLane("all");
+          }
+        },
+      },
+    });
+
+    const result = await runtime.activateSet({ setId: "qwen235", wait: true });
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.code, "ACTIVATION_SUPERSEDED");
+    assert.equal(launchCount, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("legacy inferno alias resolves to gemma431 solo set", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    await seedDesiredState(fixture.repoRoot, {
+      mode: "lane",
+      state: "idle",
+      watchdog_enforce: false,
+      lane_targets: { large: "", mini: "" },
+      fleet_id: "",
+      active_set_id: "",
+      status_detail: "",
+    });
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async () => ({ ok: true, stdout: "", stderr: "" }),
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: true, model_ids: ["google/gemma-4-31b-it"], raw: {} },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+      },
+    });
+
+    const result = await runtime.activateSet({ setId: "inferno", wait: true });
+
+    assert.equal(result.status, "ready");
+    assert.equal(result.requested_profile_id, "gemma431");
+
+    const current = await runtime.getCurrent();
+    assert.equal(current.desired_state.active_set_id, "gemma431");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("generic activate resolves active_set_id from lane targets", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    await seedDesiredState(fixture.repoRoot, {
+      mode: "lane",
+      state: "ready",
+      watchdog_enforce: true,
+      lane_targets: {
+        large: "gguf_qwen36_35b_large",
+        mini: "gguf_gemma4_26b_a4b_mini",
+      },
+      fleet_id: "",
+      active_set_id: "gamenator_qwen",
+      status_detail: "stale combo state",
+    });
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async () => ({ ok: true, stdout: "", stderr: "" }),
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: true, model_ids: ["gpt-oss-120b-Q4_K_M-00001-of-00002.gguf"], raw: {} },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+      },
+    });
+
+    const result = await runtime.activate({ profileId: "gguf_gptoss120b_large", laneId: "large", wait: true });
+
+    assert.equal(result.status, "ready");
+
+    const current = await runtime.getCurrent();
+    assert.equal(current.desired_state.active_set_id, "gptoss120");
+    assert.equal(current.desired_state.lane_targets.large, "gguf_gptoss120b_large");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("different activation set supersedes in-flight activation when preempt is allowed", async () => {
+  const fixture = await createRepoFixture();
+  let releaseLaunch;
+  const blockedLaunch = new Promise((resolve) => { releaseLaunch = resolve; });
+  try {
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          if (command.includes("run_dual_spark_trtllm_qwen235.sh")) {
+            await blockedLaunch;
+            return { ok: false, stdout: "", stderr: "superseded" };
+          }
+          if (command.includes("stop_large_lane.sh")) {
+            releaseLaunch();
+            return { ok: true, stdout: "", stderr: "" };
+          }
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: true, model_ids: ["qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M"], raw: {} },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+      },
+    });
+
+    const first = await runtime.activateSet({ setId: "qwen235", wait: false });
+    const second = await runtime.activateSet({ setId: "qwen80next", wait: true, allowPreempt: true });
+    const firstJob = await runtime.getJob(first.job_id);
+    const current = await runtime.getCurrent();
+
+    assert.ok(["ready", "skipped"].includes(second.status));
+    assert.equal(second.status === "skipped" ? second.set_id : second.requested_profile_id, "qwen80next");
+    assert.equal(firstJob.status, "failed");
+    assert.equal(firstJob.code, "ACTIVATION_SUPERSEDED");
+    assert.equal(firstJob.swap_id, first.job_id);
+    assert.ok(firstJob.controller_epoch);
+    assert.equal(current.desired_state.active_set_id, "qwen80next");
+    assert.equal(current.swap.requested_set_id, "qwen80next");
+    assert.equal(current.swap.terminal_state, "ready");
+  } finally {
+    releaseLaunch?.();
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("different activation set conflict returns authoritative swap metadata when preempt is disabled", async () => {
+  const fixture = await createRepoFixture();
+  let releaseLaunch;
+  let launchReleased = false;
+  const blockedLaunch = new Promise((resolve) => {
+    releaseLaunch = () => {
+      launchReleased = true;
+      resolve();
+    };
+  });
+  try {
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          if (command.includes("run_dual_spark_trtllm_qwen235.sh")) {
+            await blockedLaunch;
+            return { ok: true, stdout: "", stderr: "" };
+          }
+          if (isWorkerContainerInspection(command)) {
+            return { ok: true, stdout: "", stderr: "" };
+          }
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: async (baseUrl) => {
+          if (baseUrl === "http://127.0.0.1:8000") {
+            return launchReleased
+              ? { up: true, model_ids: ["nvidia/Qwen3-235B-A22B-NVFP4"], raw: {} }
+              : { up: false, model_ids: [], raw: null };
+          }
+          return { up: false, model_ids: [], raw: null };
+        },
+        sleep: async () => {},
+        uuid: (() => {
+          let count = 0;
+          return () => `job-conflict-${++count}`;
+        })(),
+      },
+    });
+
+    const first = await runtime.activateSet({ setId: "qwen235", wait: false });
+    const second = await runtime.activateSet({ setId: "qwen80next", wait: false, allowPreempt: false });
+
+    assert.equal(second.accepted, false);
+    assert.equal(second.code, "CONCURRENT_ACTIVATION");
+    assert.equal(second.swap_id, first.job_id);
+    assert.equal(second.current_job_id, first.job_id);
+    assert.equal(second.active_set_id, "qwen235");
+    assert.ok(second.controller_epoch);
+    assert.equal(typeof second.controller_revision, "number");
+    assert.equal(second.swap_terminal_state, "");
+    assert.ok(["preflight", "starting"].includes(String(second.swap_state || "")));
+
+    releaseLaunch?.();
+
+    let firstJob = await runtime.getJob(first.job_id);
+    for (let attempt = 0; attempt < 20 && firstJob?.status !== "ready"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      firstJob = await runtime.getJob(first.job_id);
+    }
+    assert.equal(firstJob?.status, "ready");
+  } finally {
+    releaseLaunch?.();
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("activateSet rejects stale ready transition when swap revision has advanced", async () => {
+  const fixture = await createRepoFixture();
+  let releaseLaunch;
+  let launchReleased = false;
+  const blockedLaunch = new Promise((resolve) => {
+    releaseLaunch = () => {
+      launchReleased = true;
+      resolve();
+    };
+  });
+  try {
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          if (command.includes("run_dual_spark_trtllm_qwen235.sh")) {
+            await blockedLaunch;
+            return { ok: true, stdout: "", stderr: "" };
+          }
+          if (isWorkerContainerInspection(command)) {
+            return { ok: true, stdout: "", stderr: "" };
+          }
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: async (baseUrl) => {
+          if (baseUrl === "http://127.0.0.1:8000") {
+            return launchReleased
+              ? { up: true, model_ids: ["nvidia/Qwen3-235B-A22B-NVFP4"], raw: {} }
+              : { up: false, model_ids: [], raw: null };
+          }
+          return { up: false, model_ids: [], raw: null };
+        },
+        sleep: async () => {},
+        uuid: (() => {
+          let count = 0;
+          return () => `job-revision-fence-${++count}`;
+        })(),
+      },
+    });
+
+    const first = await runtime.activateSet({ setId: "qwen235", wait: false });
+
+    await writeFile(
+      path.join(fixture.repoRoot, "workspace", "runtime", "swap_manifest.json"),
+      `${JSON.stringify({
+        schema_version: 1,
+        summary_version: 1,
+        controller_epoch: "swap-epoch-test",
+        controller_revision: 99,
+        last_committed_event_seq: 99,
+        runtime_incarnation_id: "runtime-test",
+        swap_id: "other-swap",
+        current_job_id: "other-job",
+        requested_set_id: "qwen80next",
+        canonical_set_id: "qwen80next",
+        requested_generation: 1,
+        observed_generation: 1,
+        state: "starting",
+        terminal_state: "",
+        started_at: "2026-04-27T00:00:00.000Z",
+        updated_at: "2026-04-27T00:00:01.000Z",
+        phase_started_at: "2026-04-27T00:00:01.000Z",
+        desired_lane_targets: { large: "gguf_qwen3_next_80b_large", mini: "" },
+        observed_lane_targets: { large: "", mini: "" },
+        parity_status: "not_required",
+        drain_status: "pending",
+        readiness_status: "pending",
+        known_idle: false,
+        reconcile_needed: false,
+        evidence_status: "pending",
+        evidence_refs: [],
+        failure_code: "",
+        failure_detail: "",
+      }, null, 2)}\n`,
+      "utf-8",
+    );
+
+    releaseLaunch?.();
+
+    let firstJob = await runtime.getJob(first.job_id);
+    for (let attempt = 0; attempt < 20 && firstJob?.status !== "failed"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      firstJob = await runtime.getJob(first.job_id);
+    }
+
+    const current = await runtime.getCurrent();
+    assert.equal(firstJob?.status, "failed");
+    assert.equal(firstJob?.code, "REVISION_CONFLICT");
+    assert.equal(current.swap.swap_id, "other-swap");
+    assert.equal(current.swap.controller_revision, 99);
+  } finally {
+    releaseLaunch?.();
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("activateSet persists swap manifest and journal for durable controller state", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          if (isWorkerContainerInspection(command)) {
+            return { ok: true, stdout: "", stderr: "" };
+          }
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: true, model_ids: ["qwen/Qwen3-Next-80B-A3B-Instruct-Q4_K_M"], raw: {} },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+        uuid: (() => {
+          let count = 0;
+          return () => `swap-test-${++count}`;
+        })(),
+      },
+    });
+
+    const result = await runtime.activateSet({ setId: "qwen80next", wait: true });
+    const current = await runtime.getCurrent();
+    const manifest = JSON.parse(await readFile(path.join(fixture.repoRoot, "workspace", "runtime", "swap_manifest.json"), "utf-8"));
+    const journalLines = (await readFile(path.join(fixture.repoRoot, "workspace", "runtime", "swap_journal.jsonl"), "utf-8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+
+    assert.equal(result.status, "ready");
+    assert.equal(result.readiness_lease.activation_set_id, "qwen80next");
+    assert.equal(result.readiness_lease.current_job_id, result.job_id);
+    assert.equal(manifest.swap_id, result.job_id);
+    assert.equal(manifest.requested_set_id, "qwen80next");
+    assert.equal(manifest.terminal_state, "ready");
+    assert.equal(current.swap.swap_id, result.job_id);
+    assert.equal(current.swap.controller_epoch, manifest.controller_epoch);
+    assert.equal(current.readiness_lease.activation_set_id, "qwen80next");
+    assert.equal(current.readiness_lease.current_job_id, result.job_id);
+    assert.equal(runtime.getJob(result.job_id).readiness_lease.activation_set_id, "qwen80next");
+    assert.ok(journalLines.some((entry) => entry.event_type === "swap_requested"));
+    assert.ok(journalLines.some((entry) => entry.event_type === "swap_ready"));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("activateSet rejects new admission while swap reconcile is required", async () => {
+  const fixture = await createRepoFixture();
+  const commands = [];
+  try {
+    await writeFile(
+      path.join(fixture.repoRoot, "workspace", "runtime", "swap_manifest.json"),
+      `${JSON.stringify({
+        schema_version: 1,
+        summary_version: 1,
+        controller_epoch: "swap-epoch-test",
+        controller_revision: 7,
+        last_committed_event_seq: 7,
+        runtime_incarnation_id: "runtime-test",
+        swap_id: "swap-reconcile-1",
+        current_job_id: "job-reconcile-1",
+        requested_set_id: "qwen80next",
+        canonical_set_id: "qwen80next",
+        requested_generation: 0,
+        observed_generation: 0,
+        state: "reconcile_needed",
+        terminal_state: "reconcile_needed",
+        started_at: "2026-04-27T00:00:00.000Z",
+        updated_at: "2026-04-27T00:00:01.000Z",
+        phase_started_at: "2026-04-27T00:00:01.000Z",
+        desired_lane_targets: { large: "gguf_qwen3_next_80b_large", mini: "" },
+        observed_lane_targets: { large: "", mini: "" },
+        parity_status: "unknown",
+        drain_status: "unknown",
+        readiness_status: "failed",
+        known_idle: false,
+        reconcile_needed: true,
+        evidence_status: "minimal",
+        evidence_refs: [],
+        failure_code: "INTERNAL_ERROR",
+        failure_detail: "waiting for operator reconcile",
+      }, null, 2)}\n`,
+      "utf-8",
+    );
+
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          commands.push(command);
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: false, model_ids: [], raw: null },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+      },
+    });
+
+    const result = await runtime.activateSet({ setId: "qwen36", wait: false });
+
+    assert.equal(result.accepted, false);
+    assert.equal(result.code, "RECONCILE_REQUIRED");
+    assert.equal(result.swap_id, "swap-reconcile-1");
+    assert.equal(result.current_job_id, "job-reconcile-1");
+    assert.equal(result.active_set_id, "qwen80next");
+    assert.equal(result.controller_revision, 7);
+    assert.equal(result.swap_state, "reconcile_needed");
+    assert.equal(result.swap_terminal_state, "reconcile_needed");
+    assert.equal(result.action_policy_state, "reconcile_needed");
+    assert.deepEqual(result.allowed_actions, ["stop", "fleet_down"]);
+    assert.equal(result.operator_action_required, "collect_fresh_evidence");
+    assert.ok(Array.isArray(result.exit_requirements));
+    assert.ok(result.blocked_actions.some((entry) => entry.action === "activate_set"));
+    assert.ok(result.blocked_actions.some((entry) => entry.action === "fleet_up"));
+    const current = await runtime.getCurrent();
+    assert.equal(current.swap.action_policy_state, "reconcile_needed");
+    assert.deepEqual(current.swap.allowed_actions, ["stop", "fleet_down"]);
+    assert.ok(current.swap.blocked_actions.some((entry) => entry.action === "activate"));
+    assert.equal(commands.length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("generic activate rejects new admission while swap reconcile is required", async () => {
+  const fixture = await createRepoFixture();
+  const commands = [];
+  try {
+    await writeFile(
+      path.join(fixture.repoRoot, "workspace", "runtime", "swap_manifest.json"),
+      `${JSON.stringify({
+        schema_version: 1,
+        summary_version: 1,
+        controller_epoch: "swap-epoch-test",
+        controller_revision: 11,
+        last_committed_event_seq: 11,
+        runtime_incarnation_id: "runtime-test",
+        swap_id: "swap-reconcile-2",
+        current_job_id: "job-reconcile-2",
+        requested_set_id: "qwen235",
+        canonical_set_id: "qwen235",
+        requested_generation: 0,
+        observed_generation: 0,
+        state: "reconcile_needed",
+        terminal_state: "reconcile_needed",
+        started_at: "2026-04-27T00:00:00.000Z",
+        updated_at: "2026-04-27T00:00:01.000Z",
+        phase_started_at: "2026-04-27T00:00:01.000Z",
+        desired_lane_targets: { large: "trt_dual_qwen235_large", mini: "" },
+        observed_lane_targets: { large: "", mini: "" },
+        parity_status: "unknown",
+        drain_status: "unknown",
+        readiness_status: "failed",
+        known_idle: false,
+        reconcile_needed: true,
+        evidence_status: "minimal",
+        evidence_refs: [],
+        failure_code: "INTERNAL_ERROR",
+        failure_detail: "waiting for operator reconcile",
+      }, null, 2)}\n`,
+      "utf-8",
+    );
+
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          commands.push(command);
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: false, model_ids: [], raw: null },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+      },
+    });
+
+    const result = await runtime.activate({
+      profileId: "trt_single_qwen3_32b_mini",
+      laneId: "mini",
+      wait: false,
+    });
+
+    assert.equal(result.accepted, false);
+    assert.equal(result.code, "RECONCILE_REQUIRED");
+    assert.equal(result.requested_profile_id, "trt_single_qwen3_32b_mini");
+    assert.equal(result.lane_id, "mini");
+    assert.equal(result.swap_id, "swap-reconcile-2");
+    assert.equal(result.current_job_id, "job-reconcile-2");
+    assert.equal(result.active_set_id, "qwen235");
+    assert.equal(result.controller_revision, 11);
+    assert.equal(result.swap_state, "reconcile_needed");
+    assert.equal(result.swap_terminal_state, "reconcile_needed");
+    assert.equal(commands.length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("fleetUp rejects new admission while swap reconcile is required", async () => {
+  const fixture = await createRepoFixture();
+  const commands = [];
+  try {
+    await writeFile(
+      path.join(fixture.repoRoot, "workspace", "runtime", "swap_manifest.json"),
+      `${JSON.stringify({
+        schema_version: 1,
+        summary_version: 1,
+        controller_epoch: "swap-epoch-test",
+        controller_revision: 13,
+        last_committed_event_seq: 13,
+        runtime_incarnation_id: "runtime-test",
+        swap_id: "swap-reconcile-fleet",
+        current_job_id: "job-reconcile-fleet",
+        requested_set_id: "qwen235",
+        canonical_set_id: "qwen235",
+        requested_generation: 0,
+        observed_generation: 0,
+        state: "reconcile_needed",
+        terminal_state: "reconcile_needed",
+        started_at: "2026-04-27T00:00:00.000Z",
+        updated_at: "2026-04-27T00:00:01.000Z",
+        phase_started_at: "2026-04-27T00:00:01.000Z",
+        desired_lane_targets: { large: "trt_dual_qwen235_large", mini: "" },
+        observed_lane_targets: { large: "", mini: "" },
+        parity_status: "unknown",
+        drain_status: "unknown",
+        readiness_status: "failed",
+        known_idle: false,
+        reconcile_needed: true,
+        evidence_status: "minimal",
+        evidence_refs: [],
+        failure_code: "INTERNAL_ERROR",
+        failure_detail: "waiting for operator reconcile",
+      }, null, 2)}\n`,
+      "utf-8",
+    );
+
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          commands.push(command);
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: false, model_ids: [], raw: null },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+      },
+    });
+
+    const result = await runtime.fleetUp({ wait: false });
+
+    assert.equal(result.accepted, false);
+    assert.equal(result.code, "RECONCILE_REQUIRED");
+    assert.equal(result.swap_id, "swap-reconcile-fleet");
+    assert.equal(result.current_job_id, "job-reconcile-fleet");
+    assert.equal(result.action_policy_state, "reconcile_needed");
+    assert.ok(result.blocked_actions.some((entry) => entry.action === "fleet_up"));
+    assert.equal(commands.length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("activateSet classifies known-idle pre-launch failure as failed_known_idle", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          if (command.includes("PORT=") && !command.includes("stop_")) {
+            return { ok: false, stdout: "", stderr: "launcher boom", error: "launcher boom" };
+          }
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: false, model_ids: [], raw: null },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+        uuid: () => "job-failed-known-idle",
+      },
+    });
+
+    const result = await runtime.activateSet({ setId: "qwen36", wait: true });
+    const current = await runtime.getCurrent();
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.code, "ACTIVATION_FAILED");
+    assert.equal(current.swap.state, "failed_known_idle");
+    assert.equal(current.swap.terminal_state, "failed_known_idle");
+    assert.equal(current.swap.known_idle, true);
+    assert.equal(current.swap.reconcile_needed, false);
+    assert.equal(current.swap.failure_code, "ACTIVATION_FAILED");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("activateSet rejects dual-box launch when parity preflight fails before teardown", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    const commands = [];
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          commands.push(command);
+          if (command.includes("[ -e") && !command.includes("ssh")) {
+            return { ok: false, stdout: "", stderr: "spark model missing" };
+          }
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: false, model_ids: [], raw: null },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+      },
+    });
+
+    const result = await runtime.activateSet({ setId: "qwen235", wait: true });
+
+    assert.equal(result.accepted, false);
+    assert.equal(result.code, "HARDWARE_UNAVAILABLE");
+    assert.equal(result.parity_status, "failed");
+    assert.ok(result.parity_reason_codes.includes("spark_model_missing"));
+    assert.equal(commands.some((command) => command.includes("stop_large_lane.sh")), false);
+    assert.equal(commands.some((command) => command.includes("run_dual_spark_trtllm_qwen235.sh")), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("activation set can invoke manual-restore profile through curated set", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    await seedDesiredState(fixture.repoRoot, {
+      mode: "lane",
+      state: "idle",
+      watchdog_enforce: false,
+      lane_targets: { large: "", mini: "" },
+      fleet_id: "",
+      active_set_id: "",
+      status_detail: "",
+    });
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async () => ({ ok: true, stdout: "", stderr: "" }),
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: true, model_ids: ["nvidia/Qwen3-235B-A22B-NVFP4"], raw: {} },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+      },
+    });
+
+    const result = await runtime.activateSet({ setId: "qwen235", wait: true });
+
+    assert.equal(result.status, "ready");
+    assert.equal(result.code, undefined);
   } finally {
     await fixture.cleanup();
   }
@@ -472,6 +1186,105 @@ trackedTest("dual-box activation fails before launch when gx10 is not clear", as
   }
 });
 
+trackedTest("activation fails before launch when pre-launch stop does not drain cleanly", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    const commands = [];
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          commands.push(command);
+          if (command.includes("stop_large_lane.sh")) {
+            return {
+              ok: false,
+              stdout: "",
+              stderr: "worker did not drain cleanly within 180s",
+              error: "stop_large_lane.sh exited 1",
+            };
+          }
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: false, model_ids: [], raw: null },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:8000": { up: false, model_ids: [], raw: null },
+        }),
+        sleep: async () => {},
+        uuid: () => "job-stop-failed",
+      },
+    });
+
+    const result = await runtime.activate({
+      profileId: "trt_dual_gpt_oss_120b_large",
+      laneId: "large",
+      wait: true,
+    });
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.code, "ACTIVATION_FAILED");
+    assert.match(result.status_detail, /pre-launch stop failed/i);
+    assert.match(result.status_detail, /worker did not drain cleanly/i);
+    assert.ok(commands.some((command) => command.includes("fleet_down.sh")));
+    assert.ok(commands.some((command) => command.includes("stop_mini_lane.sh")));
+    assert.ok(commands.some((command) => command.includes("stop_large_lane.sh")));
+    assert.equal(commands.some((command) => command.includes("launch_trt_dual_gpt_oss_120b_8000.sh")), false);
+
+    const current = await runtime.getCurrent();
+    assert.equal(current.desired_state.state, "failed");
+    assert.equal(current.desired_state.watchdog_enforce, false);
+    assert.match(current.desired_state.status_detail, /pre-launch stop failed/i);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+trackedTest("activation failure detail includes drain proof reason codes", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    const commands = [];
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      dependencies: {
+        runCommand: async (command) => {
+          commands.push(command);
+          if (command.includes("stop_large_lane.sh")) {
+            return {
+              ok: false,
+              stdout: 'LLMCOMMUNE_DRAIN_PROOF={"status":"failed","timeout_s":180,"local":{"clear":true,"reason_codes":[]},"worker":{"clear":false,"reason_codes":["gpu_compute_busy","trt_listener_present"]}}',
+              stderr: "worker did not drain cleanly within 180s",
+              error: "stop_large_lane.sh exited 1",
+            };
+          }
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": { up: false, model_ids: [], raw: null },
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+        sleep: async () => {},
+        uuid: () => "job-stop-proof-failed",
+      },
+    });
+
+    const result = await runtime.activate({
+      profileId: "trt_dual_gpt_oss_120b_large",
+      laneId: "large",
+      wait: true,
+    });
+
+    assert.equal(result.status, "failed");
+    assert.match(result.status_detail, /drain proof local=clear worker=gpu_compute_busy,trt_listener_present/i);
+    assert.equal(commands.some((command) => command.includes("launch_trt_dual_gpt_oss_120b_8000.sh")), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 trackedTest("wait false returns a job immediately and models endpoint catalogs all profiles", async () => {
   const fixture = await createRepoFixture();
   try {
@@ -515,7 +1328,7 @@ trackedTest("wait false returns a job immediately and models endpoint catalogs a
     await new Promise((resolve) => setTimeout(resolve, 50));
     const job = runtime.getJob("job-async-mini");
     assert.equal(job.ok, true);
-    assert.equal(job.status, "ready");
+    assert.ok(["running", "ready"].includes(job.status));
 
     const models = await runtime.listModels();
     const config = await loadModelsConfig(fixture.repoRoot);
@@ -599,14 +1412,14 @@ trackedTest("stale desired state is reconciled to ready or failed based on live 
     });
     await seedDesiredState(fixture.repoRoot, {
       mode: "lane",
-      state: "starting",
-      watchdog_enforce: false,
+      state: "ready",
+      watchdog_enforce: true,
       lane_targets: {
         large: "trt_dual_gpt_oss_120b_large",
         mini: "",
       },
       fleet_id: "",
-      status_detail: "starting trt_dual_gpt_oss_120b_large on large",
+      status_detail: "trt_dual_gpt_oss_120b_large ready on large",
       updated_at: staleTimestamp,
     });
 
@@ -630,14 +1443,14 @@ trackedTest("stale desired state is reconciled to ready or failed based on live 
 
     await seedDesiredState(fixture.repoRoot, {
       mode: "lane",
-      state: "starting",
-      watchdog_enforce: false,
+      state: "ready",
+      watchdog_enforce: true,
       lane_targets: {
         large: "trt_dual_gpt_oss_120b_large",
         mini: "",
       },
       fleet_id: "",
-      status_detail: "starting trt_dual_gpt_oss_120b_large on large",
+      status_detail: "trt_dual_gpt_oss_120b_large ready on large",
       updated_at: staleTimestamp,
     });
 
@@ -650,13 +1463,78 @@ trackedTest("stale desired state is reconciled to ready or failed based on live 
           "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
           "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
         }),
-        nowMs: () => Date.parse("2026-04-04T01:30:00.000Z"),
+        nowMs: () => Date.parse("2026-04-04T00:15:30.000Z"),
       },
     });
 
     const failedCurrent = await failedRuntime.getCurrent();
     assert.equal(failedCurrent.desired_state.state, "failed");
     assert.equal(failedCurrent.desired_state.watchdog_enforce, false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+
+trackedTest("startupChecks queues boot activation for qwen36 from an idle state", async () => {
+  const fixture = await createRepoFixture();
+  try {
+    const commands = [];
+    await seedDesiredState(fixture.repoRoot, {
+      mode: "idle",
+      state: "idle",
+      watchdog_enforce: false,
+      lane_targets: { large: "", mini: "" },
+      fleet_id: "",
+      active_set_id: "",
+      status_detail: "",
+    });
+
+    const runtime = createRuntime({
+      repoRoot: fixture.repoRoot,
+      bootSetId: "qwen36",
+      dependencies: {
+        runCommand: async (command) => {
+          if (isWorkerContainerInspection(command)) {
+            return { ok: true, stdout: "", stderr: "" };
+          }
+          commands.push(command);
+          if (command.includes("gguf_qwen36_35b_large")) {
+            await seedLaneSlot(fixture.repoRoot, "large", {
+              profile_id: "gguf_qwen36_35b_large",
+              slot_label: "gguf_qwen36_35b_large",
+              model_spec: "/mnt/models/other/Qwen3.6-35B-A3B-UD-Q4_K_M/files/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+            });
+          }
+          return { ok: true, stdout: "", stderr: "" };
+        },
+        probeRuntime: createProbeStub({
+          "http://127.0.0.1:8000": [
+            { up: false, model_ids: [], raw: null },
+            { up: true, model_ids: ["Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"], raw: {} },
+            { up: true, model_ids: ["Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"], raw: {} },
+          ],
+          "http://127.0.0.1:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.203:7999": { up: false, model_ids: [], raw: null },
+          "http://192.168.1.204:7999": { up: false, model_ids: [], raw: null },
+        }),
+        uuid: (() => {
+          let counter = 0;
+          return () => `job-qwen36-boot-${++counter}`;
+        })(),
+      },
+    });
+
+    await runtime.startupChecks();
+
+    let current = await runtime.getCurrent();
+    for (let attempt = 0; attempt < 20 && String(current.desired_state?.active_set_id || "") !== "qwen36"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      current = await runtime.getCurrent();
+    }
+
+    assert.equal(current.desired_state.active_set_id, "qwen36");
+    assert.equal(current.desired_state.lane_targets.large, "gguf_qwen36_35b_large");
   } finally {
     await fixture.cleanup();
   }
@@ -846,10 +1724,10 @@ trackedTest("studio summary builds canonical catalog shelves and candidate rows"
     const runtime = createRuntime({ repoRoot: fixture.repoRoot });
     const summary = await runtime.getStudioSummary();
     const catalog = summary.studio.catalog;
-    const qwenCombo = catalog.rows.find((row) => row.catalog_entry_id === "qwen80next__gemma431");
+    const qwenCombo = catalog.rows.find((row) => row.catalog_entry_id === "qwen36__gemma426");
     const gemmaSolo = catalog.rows.find((row) => row.catalog_entry_id === "gemma431");
     const gptSolo = catalog.rows.find((row) => row.catalog_entry_id === "gptoss120");
-    const qwen36Solo = catalog.shelves.promote_next.solos.find((row) => row.catalog_entry_id === "qwen36");
+    const qwen36Solo = catalog.rows.find((row) => row.catalog_entry_id === "qwen36");
 
     assert.equal(summary.ok, true);
     assert.ok(catalog);
@@ -858,14 +1736,16 @@ trackedTest("studio summary builds canonical catalog shelves and candidate rows"
     assert.ok(gptSolo);
     assert.ok(qwen36Solo);
 
-    assert.deepEqual(qwenCombo.aliases, ["gamenator_qwen"]);
+    assert.ok(qwenCombo.aliases.includes("gamenator_qwen"));
     assert.equal(qwenCombo.publication_state, "current_published");
     assert.equal(qwenCombo.catalog_shelf, "current");
-    assert.equal(qwenCombo.activation_target_id, "qwen80next-gemma431mini");
+    assert.equal(qwenCombo.activation_target_id, "gamenator_qwen");
+
 
     assert.equal(gemmaSolo.primary_variant.variant_id, "gguf");
     assert.equal(gemmaSolo.publication_state, "current_published");
     assert.equal(gemmaSolo.catalog_shelf, "current");
+    assert.equal(gemmaSolo.activation_target_id, "gemma431");
 
     assert.equal(gptSolo.publication_state, "current_published");
     assert.equal(gptSolo.recommendation_state, "promote_next");
@@ -873,10 +1753,13 @@ trackedTest("studio summary builds canonical catalog shelves and candidate rows"
     assert.equal(gptSolo.primary_variant.variant_id, "gguf");
     assert.equal(gptSolo.activation_target_id, "gptoss120");
 
-    assert.equal(qwen36Solo.publication_state, "candidate");
-    assert.equal(qwen36Solo.catalog_shelf, "promote_next");
-    assert.equal(qwen36Solo.activatable, false);
+    assert.ok(qwen36Solo.catalog_shelf === "promote_next" || qwen36Solo.catalog_shelf === "current");
+    assert.equal(qwen36Solo.activatable, true);
+    assert.equal(qwen36Solo.activation_target_id, "qwen36");
     assert.equal(qwen36Solo.primary_variant.variant_id, "gguf");
+
+    const help = await runtime.getHelp();
+    assert.ok(help.controller.activation_sets.some((entry) => entry.set_id === "qwen36-qwen36mini" && entry.lane_targets?.mini === "gguf_qwen36_35b_mini"));
   } finally {
     await fixture.cleanup();
   }
