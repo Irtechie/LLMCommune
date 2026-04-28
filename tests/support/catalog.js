@@ -1,7 +1,10 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-export const repoRoot = "/home/admin/apps/LLMCommune";
+const canonicalRepoRoot = "/home/admin/apps/LLMCommune";
+const supportDir = path.dirname(fileURLToPath(import.meta.url));
+export const repoRoot = path.resolve(supportDir, "..", "..");
 export const configPath = path.join(repoRoot, "src", "config", "models.json");
 
 export async function loadModelsConfig(root = repoRoot) {
@@ -18,10 +21,18 @@ async function fileExists(targetPath) {
   }
 }
 
+function normalizeAbsoluteScript(scriptPath, root) {
+  if (!scriptPath) return "";
+  if (scriptPath.startsWith(`${canonicalRepoRoot}/`)) {
+    return path.join(root, scriptPath.slice(`${canonicalRepoRoot}/`.length));
+  }
+  return scriptPath;
+}
+
 function launchScriptFromCommand(command, root) {
   const text = String(command || "").trim();
   const absoluteMatch = text.match(/(?:^|\s)bash\s+(['"]?)(\/[^'"\s]+\.sh)\1/);
-  if (absoluteMatch) return absoluteMatch[2];
+  if (absoluteMatch) return normalizeAbsoluteScript(absoluteMatch[2], root);
   const rootMatch = text.match(/(?:^|\s)bash\s+(['"]?)\$ROOT\/scripts\/([^'"\s]+\.sh)\1/);
   if (rootMatch) return path.join(root, "scripts", rootMatch[2]);
   return "";
@@ -32,7 +43,7 @@ function normalizeDiscoveredScript(rawPath, root) {
   if (rawPath.startsWith("$ROOT/scripts/")) {
     return path.join(root, "scripts", rawPath.slice("$ROOT/scripts/".length));
   }
-  if (rawPath.startsWith("/")) return rawPath;
+  if (rawPath.startsWith("/")) return normalizeAbsoluteScript(rawPath, root);
   return "";
 }
 

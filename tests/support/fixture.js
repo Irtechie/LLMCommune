@@ -1,8 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-
-const sourceRepoRoot = "/home/admin/apps/LLMCommune";
+import { repoRoot as sourceRepoRoot } from "./catalog.js";
 
 function mergeValue(baseValue, overrideValue) {
   if (Array.isArray(baseValue) || Array.isArray(overrideValue)) {

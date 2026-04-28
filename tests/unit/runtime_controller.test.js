@@ -2,7 +2,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { createRuntime } from "../../src/runtime.js";
@@ -811,6 +811,7 @@ trackedTest("activateSet keeps dual-box launch failures in reconcile_needed when
   const fixture = await createRepoFixture();
   try {
     const startupStatePath = path.join(fixture.repoRoot, "workspace", "jobs", "_lanes", "qwen235", "startup-state-8000.json");
+    await mkdir(path.dirname(startupStatePath), { recursive: true });
     await writeFile(
       path.join(fixture.repoRoot, "workspace", "jobs", "_lanes", "active_slot.json"),
       `${JSON.stringify({
